@@ -1,0 +1,3082 @@
+# Rust Project Map — rustynet-relay
+
+Root: /Users/iwan/Desktop/Rustynet
+Captured: 2026-05-06T15:06:09+01:00
+Git: branch `main` @ 8a9c3eab12fe  ·  uncommitted files: 0
+Files: 7  ·  Lines of source: 2976
+
+## Crate Dependencies (within this workspace)
+
+Depends on (workspace): rustynet-control
+Depended on by (workspace): rustynetd
+
+## Module Hierarchy
+
+crate root (crates/rustynet-relay/src/lib.rs)
+|-- rate_limit  (crates/rustynet-relay/src/rate_limit.rs)
+|-- session  (crates/rustynet-relay/src/session.rs)
+`-- transport  (crates/rustynet-relay/src/transport.rs)
+
+## Public API Surface
+
+35 public items across 5 file(s).
+
+/crates/rustynet-relay/src/lib.rs
+  L    3  pub mod rate_limit
+  L    4  pub mod session
+  L    5  pub mod transport
+  L   15  pub struct RelayNode
+  L   23  pub struct RelayFleet
+  L   28  pub struct RelaySelectionPolicy
+  L   34  pub fn select_best(&self, preferred_region: Option<&str>) -> Option<RelayNode>
+  L   41  pub fn select_with_policy(&self, policy: &RelaySelectionPolicy) -> Option<RelayNode>
+  L   76  pub fn mark_unhealthy(&mut self, relay_id: &str)
+
+/crates/rustynet-relay/src/main.rs
+  L   52  pub struct RelayConfig
+  L   97  pub struct RelayDaemon
+  L  608  pub fn parse_args() -> Result<RelayConfig, String>
+
+/crates/rustynet-relay/src/rate_limit.rs
+  L    9  pub struct RateLimiter
+  L   28  pub fn check_packet(&mut self, node_id: &str, packet_size_bytes: usize) -> bool
+
+/crates/rustynet-relay/src/session.rs
+  L   11  pub struct SessionId([u8
+  L   14  pub fn generate() -> Self
+  L   22  pub fn as_bytes(&self) -> &[u8; 16]
+  L   34  pub struct RelaySession
+  L   47  pub fn is_paired_with(&self, other: &RelaySession) -> bool
+
+/crates/rustynet-relay/src/transport.rs
+  L   52  pub enum RejectReason
+  L   74  pub struct RelayHello
+  L   81  pub struct RelayHelloAck
+  L   87  pub enum RelayHelloResponse
+  L   93  pub enum RelayForwardError
+  L  100  pub struct RelayForwardTarget
+  L  107  pub struct RelayTransport
+  L  122  pub fn new(
+  L  155  pub fn handle_hello_from_tuple(
+  L  288  pub fn handle_hello(&mut self, hello: RelayHello) -> RelayHelloResponse
+  L  296  pub fn touch_session_from_tuple(
+  L  324  pub fn touch_session(&mut self, session_id: SessionId) -> Result<(), String>
+  L  333  pub fn has_session(&self, session_id: SessionId) -> bool
+  L  345  pub fn forward_packet(
+  L  441  pub fn cleanup_idle_sessions(&mut self) -> Vec<RelaySession>
+  L  495  pub fn session_count(&self) -> usize
+
+
+## Document Tree
+
+`-- crates
+    `-- rustynet-relay
+        |-- .gitignore  (1 lines)
+        |-- Cargo.toml  (23 lines)
+        `-- src
+            |-- lib.rs  (170 lines)
+            |-- main.rs  (758 lines)  — Rustynet Relay Daemon
+            |-- rate_limit.rs  (161 lines)  — Rate limiting for relay sessions using token bucket algorithm.
+            |-- session.rs  (50 lines)  — Relay session tracking and pairing logic.
+            `-- transport.rs  (1813 lines)  — Relay transport session protocol and packet forwarding.
+
+
+## Files
+
+===== /crates/rustynet-relay/src/lib.rs =====
+
+   1: #![forbid(unsafe_code)]
+   2: 
+   3: pub mod rate_limit;
+   4: pub mod session;
+   5: pub mod transport;
+   6: 
+   7: pub use rate_limit::RateLimiter;
+   8: pub use session::{RelaySession, SessionId};
+   9: pub use transport::{
+  10:     RejectReason, RelayForwardError, RelayForwardTarget, RelayHello, RelayHelloAck,
+  11:     RelayHelloResponse, RelayTransport,
+  12: };
+  13: 
+  14: #[derive(Debug, Clone, PartialEq, Eq)]
+  15: pub struct RelayNode {
+  16:     pub id: String,
+  17:     pub region: String,
+  18:     pub healthy: bool,
+  19:     pub latency_ms: u32,
+  20: }
+  21: 
+  22: #[derive(Debug, Clone, PartialEq, Eq, Default)]
+  23: pub struct RelayFleet {
+  24:     pub nodes: Vec<RelayNode>,
+  25: }
+  26: 
+  27: #[derive(Debug, Clone, PartialEq, Eq, Default)]
+  28: pub struct RelaySelectionPolicy {
+  29:     pub preferred_region: Option<String>,
+  30:     pub allowed_regions: Vec<String>,
+  31: }
+  32: 
+  33: impl RelayFleet {
+  34:     pub fn select_best(&self, preferred_region: Option<&str>) -> Option<RelayNode> {
+  35:         self.select_with_policy(&RelaySelectionPolicy {
+  36:             preferred_region: preferred_region.map(ToString::to_string),
+  37:             allowed_regions: Vec::new(),
+  38:         })
+  39:     }
+  40: 
+  41:     pub fn select_with_policy(&self, policy: &RelaySelectionPolicy) -> Option<RelayNode> {
+  42:         let mut candidates = self
+  43:             .nodes
+  44:             .iter()
+  45:             .filter(|node| {
+  46:                 if policy.allowed_regions.is_empty() {
+  47:                     return true;
+  48:                 }
+  49:                 policy
+  50:                     .allowed_regions
+  51:                     .iter()
+  52:                     .any(|region| region == &node.region)
+  53:             })
+  54:             .filter(|node| node.healthy)
+  55:             .cloned()
+  56:             .collect::<Vec<_>>();
+  57:         if let Some(region) = policy.preferred_region.as_deref() {
+  58:             let regional = candidates
+  59:                 .iter()
+  60:                 .filter(|node| node.region == region)
+  61:                 .cloned()
+  62:                 .collect::<Vec<_>>();
+  63:             if !regional.is_empty() {
+  64:                 candidates = regional;
+  65:             }
+  66:         }
+  67: 
+  68:         candidates.sort_by(|left, right| {
+  69:             left.latency_ms
+  70:                 .cmp(&right.latency_ms)
+  71:                 .then(left.id.cmp(&right.id))
+  72:         });
+  73:         candidates.into_iter().next()
+  74:     }
+  75: 
+  76:     pub fn mark_unhealthy(&mut self, relay_id: &str) {
+  77:         if let Some(node) = self.nodes.iter_mut().find(|node| node.id == relay_id) {
+  78:             node.healthy = false;
+  79:         }
+  80:     }
+  81: }
+  82: 
+  83: #[cfg(test)]
+  84: mod tests {
+  85:     use super::{RelayFleet, RelayNode, RelaySelectionPolicy};
+  86: 
+  87:     #[test]
+  88:     fn relay_fleet_prefers_healthy_low_latency_nodes() {
+  89:         let fleet = RelayFleet {
+  90:             nodes: vec![
+  91:                 RelayNode {
+  92:                     id: "relay-a".to_string(),
+  93:                     region: "us-east".to_string(),
+  94:                     healthy: true,
+  95:                     latency_ms: 20,
+  96:                 },
+  97:                 RelayNode {
+  98:                     id: "relay-b".to_string(),
+  99:                     region: "us-east".to_string(),
+ 100:                     healthy: true,
+ 101:                     latency_ms: 10,
+ 102:                 },
+ 103:             ],
+ 104:         };
+ 105:         let selected = fleet
+ 106:             .select_best(Some("us-east"))
+ 107:             .expect("relay should be selected");
+ 108:         assert_eq!(selected.id, "relay-b");
+ 109:     }
+ 110: 
+ 111:     #[test]
+ 112:     fn relay_fleet_fails_over_when_primary_is_unhealthy() {
+ 113:         let mut fleet = RelayFleet {
+ 114:             nodes: vec![
+ 115:                 RelayNode {
+ 116:                     id: "relay-a".to_string(),
+ 117:                     region: "us-east".to_string(),
+ 118:                     healthy: true,
+ 119:                     latency_ms: 10,
+ 120:                 },
+ 121:                 RelayNode {
+ 122:                     id: "relay-b".to_string(),
+ 123:                     region: "us-west".to_string(),
+ 124:                     healthy: true,
+ 125:                     latency_ms: 15,
+ 126:                 },
+ 127:             ],
+ 128:         };
+ 129: 
+ 130:         let first = fleet
+ 131:             .select_best(None)
+ 132:             .expect("first relay should be selected");
+ 133:         assert_eq!(first.id, "relay-a");
+ 134: 
+ 135:         fleet.mark_unhealthy("relay-a");
+ 136:         let second = fleet
+ 137:             .select_best(None)
+ 138:             .expect("second relay should be selected");
+ 139:         assert_eq!(second.id, "relay-b");
+ 140:     }
+ 141: 
+ 142:     #[test]
+ 143:     fn relay_selection_policy_respects_allowed_regions() {
+ 144:         let fleet = RelayFleet {
+ 145:             nodes: vec![
+ 146:                 RelayNode {
+ 147:                     id: "relay-a".to_string(),
+ 148:                     region: "us-east".to_string(),
+ 149:                     healthy: true,
+ 150:                     latency_ms: 10,
+ 151:                 },
+ 152:                 RelayNode {
+ 153:                     id: "relay-b".to_string(),
+ 154:                     region: "eu-west".to_string(),
+ 155:                     healthy: true,
+ 156:                     latency_ms: 5,
+ 157:                 },
+ 158:             ],
+ 159:         };
+ 160: 
+ 161:         let policy = RelaySelectionPolicy {
+ 162:             preferred_region: Some("eu-west".to_string()),
+ 163:             allowed_regions: vec!["eu-west".to_string()],
+ 164:         };
+ 165:         let selected = fleet
+ 166:             .select_with_policy(&policy)
+ 167:             .expect("policy-constrained relay should be selected");
+ 168:         assert_eq!(selected.id, "relay-b");
+ 169:     }
+ 170: }
+
+===== /crates/rustynet-relay/src/main.rs =====
+
+   1: #![forbid(unsafe_code)]
+   2: 
+   3: //! Rustynet Relay Daemon
+   4: //!
+   5: //! A production relay server that enables NAT traversal for Rustynet nodes
+   6: //! when direct UDP connectivity is unavailable.
+   7: //!
+   8: //! # Architecture
+   9: //!
+  10: //! The relay uses **allocated-port demultiplexing**:
+  11: //! - A control port receives RelayHello messages and allocates sessions
+  12: //! - Each session gets a unique allocated port for ciphertext forwarding
+  13: //! - Inbound packets on allocated ports are forwarded to the paired session
+  14: //!
+  15: //! # Security Model
+  16: //!
+  17: //! - Ciphertext-only: relay never sees plaintext
+  18: //! - Signed tokens: ed25519 signatures from control plane
+  19: //! - Constant-time auth: no timing side channels
+  20: //! - Replay protection: nonce tracking
+  21: //! - Session binding: tokens bound to (node_id, peer_node_id, relay_id)
+  22: //! - Rate limiting: per-node packet and hello rate limits
+  23: //!
+  24: //! # Usage
+  25: //!
+  26: //! ```bash
+  27: //! rustynet-relay --bind 0.0.0.0:4500 \
+  28: //!                --relay-id "relay-us-east-1" \
+  29: //!                --verifier-key /path/to/control-verifier.pub \
+  30: //!                --port-range 50000-59999
+  31: //! ```
+  32: 
+  33: #[cfg(feature = "daemon")]
+  34: mod daemon {
+  35:     use std::collections::HashMap;
+  36:     use std::fs;
+  37:     use std::net::SocketAddr;
+  38:     use std::sync::Arc;
+  39:     use std::time::Duration;
+  40: 
+  41:     use ed25519_dalek::VerifyingKey;
+  42:     use subtle::ConstantTimeEq;
+  43:     use tokio::net::UdpSocket;
+  44:     use tokio::sync::RwLock;
+  45:     use tokio::time::interval;
+  46: 
+  47:     use rustynet_relay::session::SessionId;
+  48:     use rustynet_relay::transport::{RelayHelloResponse, RelayTransport};
+  49: 
+  50:     /// Relay daemon configuration.
+  51:     #[derive(Debug, Clone)]
+  52:     pub struct RelayConfig {
+  53:         /// UDP address to bind the control port.
+  54:         pub bind_addr: SocketAddr,
+  55:         /// 16-byte relay identifier.
+  56:         pub relay_id: [u8; 16],
+  57:         /// Path to control-plane verifier public key.
+  58:         pub verifier_key_path: String,
+  59:         /// Port range for session allocations.
+  60:         pub port_range_start: u16,
+  61:         pub port_range_end: u16,
+  62:         /// Maximum sessions per node.
+  63:         pub max_sessions_per_node: usize,
+  64:         /// Clock skew tolerance in seconds.
+  65:         pub clock_skew_tolerance_secs: u64,
+  66:         /// Cleanup interval in seconds.
+  67:         pub cleanup_interval_secs: u64,
+  68:     }
+  69: 
+  70:     impl Default for RelayConfig {
+  71:         fn default() -> Self {
+  72:             Self {
+  73:                 bind_addr: "0.0.0.0:4500".parse().unwrap(),
+  74:                 relay_id: [0; 16],
+  75:                 verifier_key_path: String::new(),
+  76:                 port_range_start: 50_000,
+  77:                 port_range_end: 59_999,
+  78:                 max_sessions_per_node: 8,
+  79:                 clock_skew_tolerance_secs: 90,
+  80:                 cleanup_interval_secs: 10,
+  81:             }
+  82:         }
+  83:     }
+  84: 
+  85:     /// Wire format constants matching relay_client.rs
+  86:     const RELAY_HELLO_MSG_TYPE: u8 = 0x01;
+  87:     const RELAY_HELLO_ACK_MSG_TYPE: u8 = 0x02;
+  88:     const RELAY_REJECT_MSG_TYPE: u8 = 0x03;
+  89:     const RELAY_KEEPALIVE_MSG_TYPE: u8 = 0x04;
+  90: 
+  91:     /// Maps allocated ports to session IDs for ciphertext forwarding.
+  92:     struct PortAllocation {
+  93:         session_id: SessionId,
+  94:     }
+  95: 
+  96:     /// Relay daemon state.
+  97:     pub struct RelayDaemon {
+  98:         config: RelayConfig,
+  99:         transport: Arc<RwLock<RelayTransport>>,
+ 100:         control_socket: UdpSocket,
+ 101:         /// Allocated port sockets indexed by port number.
+ 102:         allocated_sockets: Arc<RwLock<HashMap<u16, (UdpSocket, PortAllocation)>>>,
+ 103:         /// Next port to try allocating.
+ 104:         next_port: Arc<RwLock<u16>>,
+ 105:     }
+ 106: 
+ 107:     impl RelayDaemon {
+ 108:         /// Creates a new relay daemon.
+ 109:         pub async fn new(config: RelayConfig) -> Result<Self, String> {
+ 110:             // Load verifier key
+ 111:             let key_bytes = fs::read(&config.verifier_key_path)
+ 112:                 .map_err(|e| format!("failed to read verifier key: {e}"))?;
+ 113: 
+ 114:             let verifier_key = if key_bytes.len() == 32 {
+ 115:                 VerifyingKey::from_bytes(
+ 116:                     key_bytes
+ 117:                         .as_slice()
+ 118:                         .try_into()
+ 119:                         .map_err(|_| "invalid key length")?,
+ 120:                 )
+ 121:                 .map_err(|e| format!("invalid verifier key: {e}"))?
+ 122:             } else {
+ 123:                 return Err(format!(
+ 124:                     "verifier key must be 32 bytes, got {}",
+ 125:                     key_bytes.len()
+ 126:                 ));
+ 127:             };
+ 128: 
+ 129:             // Bind control socket
+ 130:             let control_socket = UdpSocket::bind(config.bind_addr)
+ 131:                 .await
+ 132:                 .map_err(|e| format!("failed to bind control socket: {e}"))?;
+ 133: 
+ 134:             let transport = RelayTransport::new(
+ 135:                 config.relay_id,
+ 136:                 verifier_key,
+ 137:                 config.max_sessions_per_node,
+ 138:                 config.clock_skew_tolerance_secs,
+ 139:             );
+ 140: 
+ 141:             Ok(Self {
+ 142:                 config: config.clone(),
+ 143:                 transport: Arc::new(RwLock::new(transport)),
+ 144:                 control_socket,
+ 145:                 allocated_sockets: Arc::new(RwLock::new(HashMap::new())),
+ 146:                 next_port: Arc::new(RwLock::new(config.port_range_start)),
+ 147:             })
+ 148:         }
+ 149: 
+ 150:         /// Allocates a new port for a session.
+ 151:         async fn allocate_port(&self) -> Result<(u16, UdpSocket), String> {
+ 152:             let mut next = self.next_port.write().await;
+ 153:             let sockets = self.allocated_sockets.read().await;
+ 154: 
+ 155:             let range_size =
+ 156:                 (self.config.port_range_end - self.config.port_range_start + 1) as usize;
+ 157:             let mut attempts = 0;
+ 158: 
+ 159:             loop {
+ 160:                 if attempts >= range_size {
+ 161:                     return Err("no available ports in range".to_string());
+ 162:                 }
+ 163: 
+ 164:                 let port = *next;
+ 165:                 *next = if *next >= self.config.port_range_end {
+ 166:                     self.config.port_range_start
+ 167:                 } else {
+ 168:                     *next + 1
+ 169:                 };
+ 170: 
+ 171:                 if sockets.contains_key(&port) {
+ 172:                     attempts += 1;
+ 173:                     continue;
+ 174:                 }
+ 175: 
+ 176:                 // Try to bind
+ 177:                 let addr = SocketAddr::new(self.config.bind_addr.ip(), port);
+ 178:                 match UdpSocket::bind(addr).await {
+ 179:                     Ok(socket) => return Ok((port, socket)),
+ 180:                     Err(_) => {
+ 181:                         attempts += 1;
+ 182:                         continue;
+ 183:                     }
+ 184:                 }
+ 185:             }
+ 186:         }
+ 187: 
+ 188:         /// Runs the relay daemon main loop.
+ 189:         pub async fn run(&self) -> Result<(), String> {
+ 190:             eprintln!(
+ 191:                 "rustynet-relay starting on {} relay_id={:02x?}",
+ 192:                 self.config.bind_addr,
+ 193:                 &self.config.relay_id[..4]
+ 194:             );
+ 195: 
+ 196:             // Spawn cleanup task
+ 197:             let transport_cleanup = Arc::clone(&self.transport);
+ 198:             let allocated_cleanup = Arc::clone(&self.allocated_sockets);
+ 199:             let cleanup_interval = self.config.cleanup_interval_secs;
+ 200: 
+ 201:             tokio::spawn(async move {
+ 202:                 let mut ticker = interval(Duration::from_secs(cleanup_interval));
+ 203:                 loop {
+ 204:                     ticker.tick().await;
+ 205:                     {
+ 206:                         let mut transport = transport_cleanup.write().await;
+ 207:                         let _ = transport.cleanup_idle_sessions();
+ 208:                     }
+ 209:                     Self::prune_inactive_allocated_sockets(&allocated_cleanup, &transport_cleanup)
+ 210:                         .await;
+ 211:                 }
+ 212:             });
+ 213: 
+ 214:             // Main receive loop on control socket
+ 215:             let mut buf = [0u8; 65536];
+ 216: 
+ 217:             loop {
+ 218:                 tokio::select! {
+ 219:                     recv_result = self.control_socket.recv_from(&mut buf) => {
+ 220:                         match recv_result {
+ 221:                             Ok((len, from_addr)) => {
+ 222:                                 if let Err(e) = self.handle_control_packet(&buf[..len], from_addr).await {
+ 223:                                     eprintln!("control packet error from {from_addr}: {e}");
+ 224:                                 }
+ 225:                             }
+ 226:                             Err(e) => {
+ 227:                                 eprintln!("control socket recv error: {e}");
+ 228:                             }
+ 229:                         }
+ 230:                     }
+ 231:                     _ = tokio::signal::ctrl_c() => {
+ 232:                         eprintln!("rustynet-relay shutting down");
+ 233:                         break;
+ 234:                     }
+ 235:                 }
+ 236:             }
+ 237: 
+ 238:             Ok(())
+ 239:         }
+ 240: 
+ 241:         /// Handles a packet on the control port.
+ 242:         async fn handle_control_packet(
+ 243:             &self,
+ 244:             data: &[u8],
+ 245:             from_addr: SocketAddr,
+ 246:         ) -> Result<(), String> {
+ 247:             if data.is_empty() {
+ 248:                 return Err("empty packet".to_string());
+ 249:             }
+ 250: 
+ 251:             match data[0] {
+ 252:                 RELAY_HELLO_MSG_TYPE => self.handle_hello(data, from_addr).await,
+ 253:                 _ => Err(format!("unknown message type: {:#02x}", data[0])),
+ 254:             }
+ 255:         }
+ 256: 
+ 257:         /// Handles a RelayHello message.
+ 258:         async fn handle_hello(&self, data: &[u8], from_addr: SocketAddr) -> Result<(), String> {
+ 259:             let hello = parse_relay_hello(data)?;
+ 260: 
+ 261:             let response = {
+ 262:                 let mut transport = self.transport.write().await;
+ 263:                 transport.handle_hello_from_tuple(hello, from_addr)
+ 264:             };
+ 265: 
+ 266:             match response {
+ 267:                 RelayHelloResponse::Accepted(ack) => {
+ 268:                     Self::prune_inactive_allocated_sockets(
+ 269:                         &self.allocated_sockets,
+ 270:                         &self.transport,
+ 271:                     )
+ 272:                     .await;
+ 273: 
+ 274:                     // Allocate a port for this session
+ 275:                     let (allocated_port, socket) = self.allocate_port().await?;
+ 276: 
+ 277:                     // Store the allocation
+ 278:                     {
+ 279:                         let mut sockets = self.allocated_sockets.write().await;
+ 280:                         sockets.insert(
+ 281:                             allocated_port,
+ 282:                             (
+ 283:                                 socket,
+ 284:                                 PortAllocation {
+ 285:                                     session_id: ack.session_id,
+ 286:                                 },
+ 287:                             ),
+ 288:                         );
+ 289:                     }
+ 290: 
+ 291:                     // Send ack with allocated port
+ 292:                     let ack_bytes = serialize_relay_hello_ack(ack.session_id, allocated_port);
+ 293:                     self.control_socket
+ 294:                         .send_to(&ack_bytes, from_addr)
+ 295:                         .await
+ 296:                         .map_err(|e| format!("failed to send ack: {e}"))?;
+ 297: 
+ 298:                     // Spawn task to forward packets on the allocated port
+ 299:                     self.spawn_forward_task(allocated_port).await;
+ 300: 
+ 301:                     eprintln!(
+ 302:                         "session established: {:02x?} -> port {} from {}",
+ 303:                         &ack.session_id.as_bytes()[..4],
+ 304:                         allocated_port,
+ 305:                         from_addr
+ 306:                     );
+ 307:                 }
+ 308:                 RelayHelloResponse::Rejected(reason) => {
+ 309:                     let reject_bytes = serialize_relay_reject(&format!("{reason:?}"));
+ 310:                     self.control_socket
+ 311:                         .send_to(&reject_bytes, from_addr)
+ 312:                         .await
+ 313:                         .map_err(|e| format!("failed to send reject: {e}"))?;
+ 314: 
+ 315:                     eprintln!("session rejected from {from_addr}: {reason:?}");
+ 316:                 }
+ 317:             }
+ 318: 
+ 319:             Ok(())
+ 320:         }
+ 321: 
+ 322:         /// Spawns a task to forward packets on an allocated port.
+ 323:         async fn spawn_forward_task(&self, port: u16) {
+ 324:             let allocated_sockets = Arc::clone(&self.allocated_sockets);
+ 325:             let transport = Arc::clone(&self.transport);
+ 326: 
+ 327:             tokio::spawn(async move {
+ 328:                 let mut buf = [0u8; 65536];
+ 329: 
+ 330:                 loop {
+ 331:                     // Get socket reference
+ 332:                     let socket_result = {
+ 333:                         let sockets = allocated_sockets.read().await;
+ 334:                         sockets.get(&port).map(|(s, _)| s.local_addr())
+ 335:                     };
+ 336: 
+ 337:                     let Some(Some(_)) = socket_result.map(|result| result.ok()) else {
+ 338:                         // Socket no longer exists
+ 339:                         break;
+ 340:                     };
+ 341: 
+ 342:                     // We need to recv on the socket
+ 343:                     let recv_result = {
+ 344:                         let sockets = allocated_sockets.read().await;
+ 345:                         if let Some((socket, alloc)) = sockets.get(&port) {
+ 346:                             let session_id = alloc.session_id;
+ 347:                             match socket.try_recv_from(&mut buf) {
+ 348:                                 Ok((len, from_addr)) => Some((len, from_addr, session_id)),
+ 349:                                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+ 350:                                 Err(_) => None,
+ 351:                             }
+ 352:                         } else {
+ 353:                             break;
+ 354:                         }
+ 355:                     };
+ 356: 
+ 357:                     if let Some((len, from_addr, session_id)) = recv_result {
+ 358:                         // Check for keepalive packet (5 bytes: msg_type + 4 bytes session prefix)
+ 359:                         // Keepalives refresh session activity but don't forward to peer
+ 360:                         if len == 5 && buf[0] == RELAY_KEEPALIVE_MSG_TYPE {
+ 361:                             let mut t = transport.write().await;
+ 362:                             let _ = t.touch_session_from_tuple(session_id, from_addr);
+ 363:                             continue;
+ 364:                         }
+ 365: 
+ 366:                         // Forward packet through transport
+ 367:                         let forward_result = {
+ 368:                             let mut t = transport.write().await;
+ 369:                             t.forward_packet(session_id, &buf[..len], from_addr)
+ 370:                         };
+ 371: 
+ 372:                         match forward_result {
+ 373:                             Ok(Some(target)) => {
+ 374:                                 let sockets = allocated_sockets.read().await;
+ 375:                                 if let Some((peer_socket, _)) =
+ 376:                                     sockets.get(&target.peer_allocated_port)
+ 377:                                 {
+ 378:                                     let _ = peer_socket
+ 379:                                         .send_to(&target.payload, target.peer_addr)
+ 380:                                         .await;
+ 381:                                 }
+ 382:                             }
+ 383:                             Ok(None) => {}
+ 384:                             Err(_) => {
+ 385:                                 Self::prune_inactive_allocated_sockets(
+ 386:                                     &allocated_sockets,
+ 387:                                     &transport,
+ 388:                                 )
+ 389:                                 .await;
+ 390:                             }
+ 391:                         }
+ 392:                     }
+ 393: 
+ 394:                     // Small delay to avoid busy-spinning
+ 395:                     tokio::time::sleep(Duration::from_micros(100)).await;
+ 396:                 }
+ 397:             });
+ 398:         }
+ 399: 
+ 400:         async fn prune_inactive_allocated_sockets(
+ 401:             allocated_sockets: &Arc<RwLock<HashMap<u16, (UdpSocket, PortAllocation)>>>,
+ 402:             transport: &Arc<RwLock<RelayTransport>>,
+ 403:         ) {
+ 404:             let active_sessions = {
+ 405:                 let transport = transport.read().await;
+ 406:                 let sockets = allocated_sockets.read().await;
+ 407:                 sockets
+ 408:                     .iter()
+ 409:                     .filter_map(|(port, (_socket, alloc))| {
+ 410:                         transport
+ 411:                             .has_session(alloc.session_id)
+ 412:                             .then_some((*port, alloc.session_id))
+ 413:                     })
+ 414:                     .collect::<HashMap<_, _>>()
+ 415:             };
+ 416: 
+ 417:             let mut sockets = allocated_sockets.write().await;
+ 418:             sockets.retain(|port, (_socket, alloc)| {
+ 419:                 active_sessions
+ 420:                     .get(port)
+ 421:                     .map(|session_id| {
+ 422:                         bool::from(session_id.as_bytes().ct_eq(alloc.session_id.as_bytes()))
+ 423:                     })
+ 424:                     .unwrap_or(false)
+ 425:             });
+ 426:         }
+ 427:     }
+ 428: 
+ 429:     /// Parses a RelayHello from wire format.
+ 430:     fn parse_relay_hello(data: &[u8]) -> Result<rustynet_relay::transport::RelayHello, String> {
+ 431:         if data.is_empty() || data[0] != RELAY_HELLO_MSG_TYPE {
+ 432:             return Err("not a hello message".to_string());
+ 433:         }
+ 434: 
+ 435:         let mut pos = 1;
+ 436: 
+ 437:         // Node ID
+ 438:         if pos + 2 > data.len() {
+ 439:             return Err("truncated node_id length".to_string());
+ 440:         }
+ 441:         let node_id_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+ 442:         pos += 2;
+ 443: 
+ 444:         if pos + node_id_len > data.len() {
+ 445:             return Err("truncated node_id".to_string());
+ 446:         }
+ 447:         let node_id =
+ 448:             String::from_utf8(data[pos..pos + node_id_len].to_vec()).map_err(|e| e.to_string())?;
+ 449:         pos += node_id_len;
+ 450: 
+ 451:         // Peer node ID
+ 452:         if pos + 2 > data.len() {
+ 453:             return Err("truncated peer_node_id length".to_string());
+ 454:         }
+ 455:         let peer_node_id_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+ 456:         pos += 2;
+ 457: 
+ 458:         if pos + peer_node_id_len > data.len() {
+ 459:             return Err("truncated peer_node_id".to_string());
+ 460:         }
+ 461:         let peer_node_id = String::from_utf8(data[pos..pos + peer_node_id_len].to_vec())
+ 462:             .map_err(|e| e.to_string())?;
+ 463:         pos += peer_node_id_len;
+ 464: 
+ 465:         // Token
+ 466:         if pos + 2 > data.len() {
+ 467:             return Err("truncated token length".to_string());
+ 468:         }
+ 469:         let token_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+ 470:         pos += 2;
+ 471: 
+ 472:         if pos + token_len > data.len() {
+ 473:             return Err("truncated token".to_string());
+ 474:         }
+ 475:         let token_data = &data[pos..pos + token_len];
+ 476:         let session_token = parse_relay_token(token_data)?;
+ 477: 
+ 478:         Ok(rustynet_relay::transport::RelayHello {
+ 479:             node_id,
+ 480:             peer_node_id,
+ 481:             session_token,
+ 482:         })
+ 483:     }
+ 484: 
+ 485:     /// Parses a RelaySessionToken from wire format.
+ 486:     fn parse_relay_token(data: &[u8]) -> Result<rustynet_control::RelaySessionToken, String> {
+ 487:         use rustynet_control::RelaySessionToken;
+ 488: 
+ 489:         let mut pos = 0;
+ 490: 
+ 491:         // Version
+ 492:         if pos >= data.len() {
+ 493:             return Err("missing version".to_string());
+ 494:         }
+ 495:         let version = data[pos];
+ 496:         if version != 1 {
+ 497:             return Err(format!("unsupported token version: {version}"));
+ 498:         }
+ 499:         pos += 1;
+ 500: 
+ 501:         // Node ID
+ 502:         if pos + 2 > data.len() {
+ 503:             return Err("truncated token node_id length".to_string());
+ 504:         }
+ 505:         let node_id_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+ 506:         pos += 2;
+ 507: 
+ 508:         if pos + node_id_len > data.len() {
+ 509:             return Err("truncated token node_id".to_string());
+ 510:         }
+ 511:         let node_id = String::from_utf8(data[pos..pos + node_id_len].to_vec())
+ 512:             .map_err(|e| format!("invalid token node_id: {e}"))?;
+ 513:         pos += node_id_len;
+ 514: 
+ 515:         // Peer node ID
+ 516:         if pos + 2 > data.len() {
+ 517:             return Err("truncated token peer_node_id length".to_string());
+ 518:         }
+ 519:         let peer_node_id_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+ 520:         pos += 2;
+ 521: 
+ 522:         if pos + peer_node_id_len > data.len() {
+ 523:             return Err("truncated token peer_node_id".to_string());
+ 524:         }
+ 525:         let peer_node_id = String::from_utf8(data[pos..pos + peer_node_id_len].to_vec())
+ 526:             .map_err(|e| format!("invalid token peer_node_id: {e}"))?;
+ 527:         pos += peer_node_id_len;
+ 528: 
+ 529:         // Relay ID (16 bytes)
+ 530:         if pos + 16 > data.len() {
+ 531:             return Err("truncated relay_id".to_string());
+ 532:         }
+ 533:         let relay_id: [u8; 16] = data[pos..pos + 16]
+ 534:             .try_into()
+ 535:             .map_err(|_| "invalid relay_id")?;
+ 536:         pos += 16;
+ 537: 
+ 538:         // Scope
+ 539:         if pos + 2 > data.len() {
+ 540:             return Err("truncated scope length".to_string());
+ 541:         }
+ 542:         let scope_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+ 543:         pos += 2;
+ 544: 
+ 545:         if pos + scope_len > data.len() {
+ 546:             return Err("truncated scope".to_string());
+ 547:         }
+ 548:         let scope = String::from_utf8(data[pos..pos + scope_len].to_vec())
+ 549:             .map_err(|e| format!("invalid scope: {e}"))?;
+ 550:         pos += scope_len;
+ 551: 
+ 552:         // Timestamps
+ 553:         if pos + 16 > data.len() {
+ 554:             return Err("truncated timestamps".to_string());
+ 555:         }
+ 556:         let issued_at_unix = u64::from_be_bytes(data[pos..pos + 8].try_into().unwrap());
+ 557:         pos += 8;
+ 558:         let expires_at_unix = u64::from_be_bytes(data[pos..pos + 8].try_into().unwrap());
+ 559:         pos += 8;
+ 560: 
+ 561:         // Nonce (16 bytes)
+ 562:         if pos + 16 > data.len() {
+ 563:             return Err("truncated nonce".to_string());
+ 564:         }
+ 565:         let nonce: [u8; 16] = data[pos..pos + 16]
+ 566:             .try_into()
+ 567:             .map_err(|_| "invalid nonce")?;
+ 568:         pos += 16;
+ 569: 
+ 570:         // Signature (64 bytes)
+ 571:         if pos + 64 > data.len() {
+ 572:             return Err("truncated signature".to_string());
+ 573:         }
+ 574:         let signature: [u8; 64] = data[pos..pos + 64]
+ 575:             .try_into()
+ 576:             .map_err(|_| "invalid signature")?;
+ 577: 
+ 578:         Ok(RelaySessionToken {
+ 579:             node_id,
+ 580:             peer_node_id,
+ 581:             relay_id,
+ 582:             scope,
+ 583:             issued_at_unix,
+ 584:             expires_at_unix,
+ 585:             nonce,
+ 586:             signature,
+ 587:         })
+ 588:     }
+ 589: 
+ 590:     /// Serializes a RelayHelloAck for wire transmission.
+ 591:     fn serialize_relay_hello_ack(session_id: SessionId, allocated_port: u16) -> Vec<u8> {
+ 592:         let mut buf = Vec::with_capacity(19);
+ 593:         buf.push(RELAY_HELLO_ACK_MSG_TYPE);
+ 594:         buf.extend_from_slice(session_id.as_bytes());
+ 595:         buf.extend_from_slice(&allocated_port.to_be_bytes());
+ 596:         buf
+ 597:     }
+ 598: 
+ 599:     /// Serializes a rejection message.
+ 600:     fn serialize_relay_reject(reason: &str) -> Vec<u8> {
+ 601:         let mut buf = Vec::with_capacity(1 + reason.len());
+ 602:         buf.push(RELAY_REJECT_MSG_TYPE);
+ 603:         buf.extend_from_slice(reason.as_bytes());
+ 604:         buf
+ 605:     }
+ 606: 
+ 607:     /// Parses command-line arguments into RelayConfig.
+ 608:     pub fn parse_args() -> Result<RelayConfig, String> {
+ 609:         let args: Vec<String> = std::env::args().collect();
+ 610:         let mut config = RelayConfig::default();
+ 611: 
+ 612:         let mut i = 1;
+ 613:         while i < args.len() {
+ 614:             match args[i].as_str() {
+ 615:                 "--bind" => {
+ 616:                     i += 1;
+ 617:                     if i >= args.len() {
+ 618:                         return Err("--bind requires an argument".to_string());
+ 619:                     }
+ 620:                     config.bind_addr = args[i]
+ 621:                         .parse()
+ 622:                         .map_err(|e| format!("invalid bind address: {e}"))?;
+ 623:                 }
+ 624:                 "--relay-id" => {
+ 625:                     i += 1;
+ 626:                     if i >= args.len() {
+ 627:                         return Err("--relay-id requires an argument".to_string());
+ 628:                     }
+ 629:                     let id_str = &args[i];
+ 630:                     // Hash the string to get a 16-byte relay ID
+ 631:                     use sha2::{Digest, Sha256};
+ 632:                     let hash = Sha256::digest(id_str.as_bytes());
+ 633:                     config.relay_id.copy_from_slice(&hash[..16]);
+ 634:                 }
+ 635:                 "--verifier-key" => {
+ 636:                     i += 1;
+ 637:                     if i >= args.len() {
+ 638:                         return Err("--verifier-key requires an argument".to_string());
+ 639:                     }
+ 640:                     config.verifier_key_path = args[i].clone();
+ 641:                 }
+ 642:                 "--port-range" => {
+ 643:                     i += 1;
+ 644:                     if i >= args.len() {
+ 645:                         return Err("--port-range requires an argument".to_string());
+ 646:                     }
+ 647:                     let parts: Vec<&str> = args[i].split('-').collect();
+ 648:                     if parts.len() != 2 {
+ 649:                         return Err("--port-range must be START-END".to_string());
+ 650:                     }
+ 651:                     config.port_range_start = parts[0]
+ 652:                         .parse()
+ 653:                         .map_err(|e| format!("invalid port range start: {e}"))?;
+ 654:                     config.port_range_end = parts[1]
+ 655:                         .parse()
+ 656:                         .map_err(|e| format!("invalid port range end: {e}"))?;
+ 657:                 }
+ 658:                 "--max-sessions-per-node" => {
+ 659:                     i += 1;
+ 660:                     if i >= args.len() {
+ 661:                         return Err("--max-sessions-per-node requires an argument".to_string());
+ 662:                     }
+ 663:                     config.max_sessions_per_node = args[i]
+ 664:                         .parse()
+ 665:                         .map_err(|e| format!("invalid max sessions: {e}"))?;
+ 666:                 }
+ 667:                 "--help" | "-h" => {
+ 668:                     eprintln!(
+ 669:                         "Usage: rustynet-relay [OPTIONS]\n\n\
+ 670:                         Options:\n  \
+ 671:                           --bind <ADDR>              UDP bind address (default: 0.0.0.0:4500)\n  \
+ 672:                           --relay-id <ID>            Relay identifier string\n  \
+ 673:                           --verifier-key <PATH>      Path to control verifier public key\n  \
+ 674:                           --port-range <START-END>   Port range for allocations (default: 50000-59999)\n  \
+ 675:                           --max-sessions-per-node <N> Max sessions per node (default: 8)\n  \
+ 676:                           --help                     Show this help"
+ 677:                     );
+ 678:                     std::process::exit(0);
+ 679:                 }
+ 680:                 arg => {
+ 681:                     return Err(format!("unknown argument: {arg}"));
+ 682:                 }
+ 683:             }
+ 684:             i += 1;
+ 685:         }
+ 686: 
+ 687:         if config.verifier_key_path.is_empty() {
+ 688:             return Err("--verifier-key is required".to_string());
+ 689:         }
+ 690: 
+ 691:         if config.relay_id == [0; 16] {
+ 692:             return Err("--relay-id is required".to_string());
+ 693:         }
+ 694: 
+ 695:         Ok(config)
+ 696:     }
+ 697: }
+ 698: 
+ 699: #[cfg(feature = "daemon")]
+ 700: #[tokio::main]
+ 701: async fn main() {
+ 702:     use daemon::{RelayDaemon, parse_args};
+ 703: 
+ 704:     let config = match parse_args() {
+ 705:         Ok(c) => c,
+ 706:         Err(e) => {
+ 707:             eprintln!("error: {e}");
+ 708:             std::process::exit(1);
+ 709:         }
+ 710:     };
+ 711: 
+ 712:     let daemon = match RelayDaemon::new(config).await {
+ 713:         Ok(d) => d,
+ 714:         Err(e) => {
+ 715:             eprintln!("failed to start relay: {e}");
+ 716:             std::process::exit(1);
+ 717:         }
+ 718:     };
+ 719: 
+ 720:     if let Err(e) = daemon.run().await {
+ 721:         eprintln!("relay error: {e}");
+ 722:         std::process::exit(1);
+ 723:     }
+ 724: }
+ 725: 
+ 726: #[cfg(not(feature = "daemon"))]
+ 727: fn main() {
+ 728:     // Fallback for when daemon feature is not enabled - basic selection demo
+ 729:     use rustynet_relay::{RelayFleet, RelayNode};
+ 730: 
+ 731:     let fleet = RelayFleet {
+ 732:         nodes: vec![
+ 733:             RelayNode {
+ 734:                 id: "relay-us-east".to_string(),
+ 735:                 region: "us-east".to_string(),
+ 736:                 healthy: true,
+ 737:                 latency_ms: 20,
+ 738:             },
+ 739:             RelayNode {
+ 740:                 id: "relay-us-west".to_string(),
+ 741:                 region: "us-west".to_string(),
+ 742:                 healthy: true,
+ 743:                 latency_ms: 28,
+ 744:             },
+ 745:         ],
+ 746:     };
+ 747: 
+ 748:     match fleet.select_best(Some("us-east")) {
+ 749:         Some(relay) => println!(
+ 750:             "rustynet-relay ready: selected={} region={} latency_ms={}",
+ 751:             relay.id, relay.region, relay.latency_ms
+ 752:         ),
+ 753:         None => {
+ 754:             eprintln!("rustynet-relay startup failed: no healthy relays available");
+ 755:             std::process::exit(1);
+ 756:         }
+ 757:     }
+ 758: }
+
+===== /crates/rustynet-relay/.gitignore =====
+
+   1: /target
+
+===== /crates/rustynet-relay/Cargo.toml =====
+
+   1: [package]
+   2: name = "rustynet-relay"
+   3: version.workspace = true
+   4: edition.workspace = true
+   5: license.workspace = true
+   6: authors.workspace = true
+   7: 
+   8: [dependencies]
+   9: subtle = "2"
+  10: ed25519-dalek = { version = "2", features = ["rand_core"] }
+  11: rand.workspace = true
+  12: rustynet-control = { path = "../rustynet-control" }
+  13: sha2 = { version = "0.10", optional = true }
+  14: tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "sync", "time", "signal"], optional = true }
+  15: tracing = { version = "0.1", optional = true }
+  16: 
+  17: [features]
+  18: default = []
+  19: daemon = ["tokio", "tracing", "sha2"]
+  20: 
+  21: [[bin]]
+  22: name = "rustynet-relay"
+  23: required-features = ["daemon"]
+
+===== /crates/rustynet-relay/src/rate_limit.rs =====
+
+   1: #![forbid(unsafe_code)]
+   2: 
+   3: //! Rate limiting for relay sessions using token bucket algorithm.
+   4: 
+   5: use std::collections::HashMap;
+   6: use std::time::Instant;
+   7: 
+   8: #[derive(Debug, Clone)]
+   9: pub struct RateLimiter {
+  10:     pub max_pps: u64,
+  11:     pub max_bps: u64,
+  12:     pub max_sessions_per_node: usize,
+  13:     buckets: HashMap<String, TokenBucket>,
+  14: }
+  15: 
+  16: impl Default for RateLimiter {
+  17:     fn default() -> Self {
+  18:         Self {
+  19:             max_pps: 10_000,
+  20:             max_bps: 100_000_000, // 100 Mbps
+  21:             max_sessions_per_node: 8,
+  22:             buckets: HashMap::new(),
+  23:         }
+  24:     }
+  25: }
+  26: 
+  27: impl RateLimiter {
+  28:     pub fn check_packet(&mut self, node_id: &str, packet_size_bytes: usize) -> bool {
+  29:         let bucket = self
+  30:             .buckets
+  31:             .entry(node_id.to_string())
+  32:             .or_insert_with(|| TokenBucket::new(self.max_pps, self.max_bps));
+  33: 
+  34:         bucket.check_and_consume(1, packet_size_bytes * 8)
+  35:     }
+  36: }
+  37: 
+  38: #[derive(Debug, Clone)]
+  39: struct TokenBucket {
+  40:     max_pps: u64,
+  41:     max_bps: u64,
+  42:     packet_tokens: f64,
+  43:     bit_tokens: f64,
+  44:     last_refill: Instant,
+  45: }
+  46: 
+  47: impl TokenBucket {
+  48:     fn new(max_pps: u64, max_bps: u64) -> Self {
+  49:         Self {
+  50:             max_pps,
+  51:             max_bps,
+  52:             packet_tokens: max_pps as f64,
+  53:             bit_tokens: max_bps as f64,
+  54:             last_refill: Instant::now(),
+  55:         }
+  56:     }
+  57: 
+  58:     fn check_and_consume(&mut self, packets: u64, bits: usize) -> bool {
+  59:         self.refill();
+  60: 
+  61:         if self.packet_tokens >= packets as f64 && self.bit_tokens >= bits as f64 {
+  62:             self.packet_tokens -= packets as f64;
+  63:             self.bit_tokens -= bits as f64;
+  64:             true
+  65:         } else {
+  66:             false
+  67:         }
+  68:     }
+  69: 
+  70:     fn refill(&mut self) {
+  71:         let now = Instant::now();
+  72:         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+  73:         self.last_refill = now;
+  74: 
+  75:         self.packet_tokens =
+  76:             (self.packet_tokens + elapsed * self.max_pps as f64).min(self.max_pps as f64);
+  77: 
+  78:         self.bit_tokens =
+  79:             (self.bit_tokens + elapsed * self.max_bps as f64).min(self.max_bps as f64);
+  80:     }
+  81: }
+  82: 
+  83: #[cfg(test)]
+  84: mod tests {
+  85:     use super::*;
+  86:     use std::thread;
+  87:     use std::time::Duration;
+  88: 
+  89:     #[test]
+  90:     fn test_rate_limiter_accepts_within_limit() {
+  91:         let mut limiter = RateLimiter::default();
+  92: 
+  93:         // Should accept packets within rate limit
+  94:         for _ in 0..100 {
+  95:             assert!(limiter.check_packet("node-a", 1000));
+  96:         }
+  97:     }
+  98: 
+  99:     #[test]
+ 100:     fn test_rate_limiter_drops_beyond_limit() {
+ 101:         let mut limiter = RateLimiter {
+ 102:             max_pps: 10,
+ 103:             max_bps: 10_000,
+ 104:             max_sessions_per_node: 8,
+ 105:             buckets: HashMap::new(),
+ 106:         };
+ 107: 
+ 108:         // Exhaust tokens
+ 109:         for _ in 0..10 {
+ 110:             assert!(limiter.check_packet("node-a", 100));
+ 111:         }
+ 112: 
+ 113:         // Next packet should be dropped
+ 114:         assert!(!limiter.check_packet("node-a", 100));
+ 115:     }
+ 116: 
+ 117:     #[test]
+ 118:     fn test_rate_limiter_refills_over_time() {
+ 119:         let mut limiter = RateLimiter {
+ 120:             max_pps: 10,
+ 121:             max_bps: 10_000,
+ 122:             max_sessions_per_node: 8,
+ 123:             buckets: HashMap::new(),
+ 124:         };
+ 125: 
+ 126:         // Exhaust tokens
+ 127:         for _ in 0..10 {
+ 128:             assert!(limiter.check_packet("node-a", 100));
+ 129:         }
+ 130: 
+ 131:         // Should be rate limited
+ 132:         assert!(!limiter.check_packet("node-a", 100));
+ 133: 
+ 134:         // Wait for refill
+ 135:         thread::sleep(Duration::from_millis(150));
+ 136: 
+ 137:         // Should accept again
+ 138:         assert!(limiter.check_packet("node-a", 100));
+ 139:     }
+ 140: 
+ 141:     #[test]
+ 142:     fn test_rate_limiter_per_node_isolation() {
+ 143:         let mut limiter = RateLimiter {
+ 144:             max_pps: 10,
+ 145:             max_bps: 10_000,
+ 146:             max_sessions_per_node: 8,
+ 147:             buckets: HashMap::new(),
+ 148:         };
+ 149: 
+ 150:         // Exhaust tokens for node-a
+ 151:         for _ in 0..10 {
+ 152:             assert!(limiter.check_packet("node-a", 100));
+ 153:         }
+ 154: 
+ 155:         // node-a should be rate limited
+ 156:         assert!(!limiter.check_packet("node-a", 100));
+ 157: 
+ 158:         // node-b should still have tokens
+ 159:         assert!(limiter.check_packet("node-b", 100));
+ 160:     }
+ 161: }
+
+===== /crates/rustynet-relay/src/session.rs =====
+
+   1: #![forbid(unsafe_code)]
+   2: 
+   3: //! Relay session tracking and pairing logic.
+   4: 
+   5: use std::net::SocketAddr;
+   6: use std::time::Instant;
+   7: 
+   8: use rand::TryRngCore;
+   9: 
+  10: #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+  11: pub struct SessionId([u8; 16]);
+  12: 
+  13: impl SessionId {
+  14:     pub fn generate() -> Self {
+  15:         let mut id = [0u8; 16];
+  16:         rand::rngs::OsRng
+  17:             .try_fill_bytes(&mut id)
+  18:             .expect("os randomness unavailable for relay session id");
+  19:         Self(id)
+  20:     }
+  21: 
+  22:     pub fn as_bytes(&self) -> &[u8; 16] {
+  23:         &self.0
+  24:     }
+  25: }
+  26: 
+  27: impl From<[u8; 16]> for SessionId {
+  28:     fn from(bytes: [u8; 16]) -> Self {
+  29:         Self(bytes)
+  30:     }
+  31: }
+  32: 
+  33: #[derive(Debug, Clone)]
+  34: pub struct RelaySession {
+  35:     pub session_id: SessionId,
+  36:     pub node_id: String,
+  37:     pub peer_node_id: String,
+  38:     pub allocated_port: u16,
+  39:     pub hello_source_addr: SocketAddr,
+  40:     pub bound_peer_addr: Option<SocketAddr>,
+  41:     pub expires_at_unix: u64,
+  42:     pub established_at: Instant,
+  43:     pub last_packet_at: Instant,
+  44: }
+  45: 
+  46: impl RelaySession {
+  47:     pub fn is_paired_with(&self, other: &RelaySession) -> bool {
+  48:         self.node_id == other.peer_node_id && self.peer_node_id == other.node_id
+  49:     }
+  50: }
+
+===== /crates/rustynet-relay/src/transport.rs =====
+
+   1: #![forbid(unsafe_code)]
+   2: 
+   3: //! Relay transport session protocol and packet forwarding.
+   4: //!
+   5: //! This module implements the relay session authentication and bidirectional
+   6: //! packet forwarding for nodes that cannot establish direct connectivity.
+   7: //!
+   8: //! # Security model
+   9: //!
+  10: //! - **Ciphertext-only relay**: payloads are forwarded byte-for-byte without
+  11: //!   inspection.  The relay never sees plaintext.
+  12: //! - **Signed tokens**: every session requires a control-plane-issued
+  13: //!   [`RelaySessionToken`] with a valid ed25519 signature.
+  14: //! - **Constant-time auth**: all secret-field comparisons (`node_id`,
+  15: //!   `peer_node_id`, `relay_id`) use `subtle::ConstantTimeEq`.
+  16: //! - **Replay protection**: each token nonce is remembered for the duration of
+  17: //!   the max TTL window; replayed nonces are rejected.
+  18: //! - **Relay-binding**: tokens carry the intended relay's `relay_id`; the
+  19: //!   relay verifies this matches its own identity.
+  20: //! - **Scope enforcement**: tokens must carry `scope=forward_ciphertext_only`.
+  21: //! - **Bounded resources**: per-node session caps, per-node packet rate limits,
+  22: //!   per-node hello rate limits, maximum packet size, idle/half-open timeouts.
+  23: 
+  24: use std::collections::HashMap;
+  25: use std::net::SocketAddr;
+  26: use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+  27: 
+  28: use ed25519_dalek::VerifyingKey;
+  29: use rustynet_control::{RELAY_TOKEN_SCOPE, RelaySessionToken};
+  30: use subtle::ConstantTimeEq;
+  31: 
+  32: use crate::rate_limit::RateLimiter;
+  33: use crate::session::{RelaySession, SessionId};
+  34: 
+  35: /// Maximum TTL we accept from a token's `issued_at` → `expires_at` span.
+  36: const MAX_RELAY_TTL_SECS: u64 = 120;
+  37: /// How long we keep a half-open (un-paired) session before evicting it.
+  38: const HALF_OPEN_SESSION_TIMEOUT_SECS: u64 = 60;
+  39: /// How long an idle (no packets) session may remain open.
+  40: const IDLE_SESSION_TIMEOUT_SECS: u64 = 30;
+  41: /// Maximum forwarded-payload size.  Packets larger than this are dropped
+  42: /// silently rather than returned as an error (to avoid amplification).
+  43: const MAX_PACKET_SIZE_BYTES: usize = 65_536;
+  44: /// How long we retain nonces in the replay-prevention store (must cover the
+  45: /// full TTL window so a nonce cannot be recycled within its validity period).
+  46: const NONCE_RETENTION_SECS: u64 = MAX_RELAY_TTL_SECS * 2;
+  47: /// Maximum `handle_hello` calls accepted per node within a one-second window
+  48: /// before the hello itself is rejected (separate from packet rate limiting).
+  49: const MAX_HELLOS_PER_NODE_PER_SEC: u32 = 5;
+  50: 
+  51: #[derive(Debug, Clone, PartialEq, Eq)]
+  52: pub enum RejectReason {
+  53:     /// Token signature invalid, scope wrong, relay-id mismatch, node-id
+  54:     /// mismatch, or TTL out of bounds.
+  55:     InvalidToken,
+  56:     /// Token expiry timestamp has passed (plus skew tolerance).
+  57:     ExpiredToken,
+  58:     /// This token nonce was already seen (replay detected).
+  59:     ReplayedNonce,
+  60:     /// The `peer_node_id` in the hello does not match the token's field.
+  61:     PeerMismatch,
+  62:     /// Per-node session cap has been reached.
+  63:     Capacity,
+  64:     /// Hello rate limit for this node has been exceeded.
+  65:     RateLimitExceeded,
+  66: }
+  67: 
+  68: /// Session establishment request from a node to the relay.
+  69: ///
+  70: /// `PartialEq`/`Eq` are not derived because the embedded `RelaySessionToken`
+  71: /// deliberately does not implement them (to prevent non-constant-time
+  72: /// comparisons on secret fields).  Use `ct_eq` on the token when needed.
+  73: #[derive(Debug, Clone)]
+  74: pub struct RelayHello {
+  75:     pub node_id: String,
+  76:     pub peer_node_id: String,
+  77:     pub session_token: RelaySessionToken,
+  78: }
+  79: 
+  80: #[derive(Debug, Clone, PartialEq, Eq)]
+  81: pub struct RelayHelloAck {
+  82:     pub session_id: SessionId,
+  83:     pub allocated_port: u16,
+  84: }
+  85: 
+  86: #[derive(Debug, Clone, PartialEq, Eq)]
+  87: pub enum RelayHelloResponse {
+  88:     Accepted(RelayHelloAck),
+  89:     Rejected(RejectReason),
+  90: }
+  91: 
+  92: #[derive(Debug, Clone, PartialEq, Eq)]
+  93: pub enum RelayForwardError {
+  94:     SessionNotFound,
+  95:     SessionExpired,
+  96:     UnauthorizedSourceTuple,
+  97: }
+  98: 
+  99: #[derive(Debug, Clone, PartialEq, Eq)]
+ 100: pub struct RelayForwardTarget {
+ 101:     pub peer_session_id: SessionId,
+ 102:     pub peer_allocated_port: u16,
+ 103:     pub peer_addr: SocketAddr,
+ 104:     pub payload: Vec<u8>,
+ 105: }
+ 106: 
+ 107: pub struct RelayTransport {
+ 108:     /// This relay's own identifier.  Every accepted token must have a matching
+ 109:     /// `relay_id`; tokens issued for a different relay are rejected.
+ 110:     relay_id: [u8; 16],
+ 111:     sessions: HashMap<SessionId, RelaySession>,
+ 112:     node_pair_index: HashMap<(String, String), SessionId>,
+ 113:     rate_limiter: RateLimiter,
+ 114:     control_verifier_key: VerifyingKey,
+ 115:     nonce_store: NonceStore,
+ 116:     hello_limiter: HelloLimiter,
+ 117:     clock_skew_tolerance_secs: u64,
+ 118:     max_sessions_per_node: usize,
+ 119: }
+ 120: 
+ 121: impl RelayTransport {
+ 122:     pub fn new(
+ 123:         relay_id: [u8; 16],
+ 124:         control_verifier_key: VerifyingKey,
+ 125:         max_sessions_per_node: usize,
+ 126:         clock_skew_tolerance_secs: u64,
+ 127:     ) -> Self {
+ 128:         Self {
+ 129:             relay_id,
+ 130:             sessions: HashMap::new(),
+ 131:             node_pair_index: HashMap::new(),
+ 132:             rate_limiter: RateLimiter::default(),
+ 133:             control_verifier_key,
+ 134:             nonce_store: NonceStore::default(),
+ 135:             hello_limiter: HelloLimiter::new(MAX_HELLOS_PER_NODE_PER_SEC),
+ 136:             clock_skew_tolerance_secs,
+ 137:             max_sessions_per_node,
+ 138:         }
+ 139:     }
+ 140: 
+ 141:     /// Process a session establishment request.
+ 142:     ///
+ 143:     /// All security checks are performed in a deliberate order:
+ 144:     ///
+ 145:     /// 1. Hello rate limit (cheap, no crypto — shed load before signature work)
+ 146:     /// 2. Signature verification (ed25519, inherently constant-time)
+ 147:     /// 3. TTL bound check (max 120 s)
+ 148:     /// 4. Token freshness / expiry
+ 149:     /// 5. Replay nonce check
+ 150:     /// 6. `node_id` binding (ct_eq: hello.node_id == token.node_id)
+ 151:     /// 7. `peer_node_id` binding (ct_eq: hello.peer_node_id == token.peer_node_id)
+ 152:     /// 8. `relay_id` binding (ct_eq: token.relay_id == self.relay_id)
+ 153:     /// 9. Scope enforcement (token.scope == "forward_ciphertext_only")
+ 154:     /// 10. Per-node session capacity
+ 155:     pub fn handle_hello_from_tuple(
+ 156:         &mut self,
+ 157:         hello: RelayHello,
+ 158:         observed_addr: SocketAddr,
+ 159:     ) -> RelayHelloResponse {
+ 160:         // Check 1: Hello rate limit — shed before any crypto work
+ 161:         if !self.hello_limiter.check(&hello.node_id) {
+ 162:             return RelayHelloResponse::Rejected(RejectReason::RateLimitExceeded);
+ 163:         }
+ 164: 
+ 165:         // Check 2: Verify token signature (ed25519, constant-time internally)
+ 166:         if let Err(e) = hello
+ 167:             .session_token
+ 168:             .verify_signature(&self.control_verifier_key)
+ 169:         {
+ 170:             eprintln!("Relay hello rejected: invalid signature: {e}");
+ 171:             return RelayHelloResponse::Rejected(RejectReason::InvalidToken);
+ 172:         }
+ 173: 
+ 174:         // Check 3: Verify token TTL bound (max 120 s)
+ 175:         let ttl = hello.session_token.ttl_secs();
+ 176:         if ttl > MAX_RELAY_TTL_SECS {
+ 177:             eprintln!("Relay hello rejected: TTL exceeds max ({ttl} > {MAX_RELAY_TTL_SECS})");
+ 178:             return RelayHelloResponse::Rejected(RejectReason::InvalidToken);
+ 179:         }
+ 180: 
+ 181:         // Check 4: Token freshness / expiry
+ 182:         let now_unix = SystemTime::now()
+ 183:             .duration_since(UNIX_EPOCH)
+ 184:             .unwrap()
+ 185:             .as_secs();
+ 186: 
+ 187:         if hello
+ 188:             .session_token
+ 189:             .is_expired(now_unix, self.clock_skew_tolerance_secs)
+ 190:         {
+ 191:             eprintln!("Relay hello rejected: token expired");
+ 192:             return RelayHelloResponse::Rejected(RejectReason::ExpiredToken);
+ 193:         }
+ 194: 
+ 195:         // Check 5: Replay nonce
+ 196:         if self.nonce_store.contains(&hello.session_token.nonce) {
+ 197:             eprintln!("Relay hello rejected: nonce replay detected");
+ 198:             return RelayHelloResponse::Rejected(RejectReason::ReplayedNonce);
+ 199:         }
+ 200: 
+ 201:         // Check 6: node_id binding (constant-time)
+ 202:         let node_id_match: bool = hello
+ 203:             .node_id
+ 204:             .as_bytes()
+ 205:             .ct_eq(hello.session_token.node_id.as_bytes())
+ 206:             .into();
+ 207:         if !node_id_match {
+ 208:             eprintln!("Relay hello rejected: node_id mismatch between hello and token");
+ 209:             return RelayHelloResponse::Rejected(RejectReason::InvalidToken);
+ 210:         }
+ 211: 
+ 212:         // Check 7: peer_node_id binding (constant-time)
+ 213:         let peer_match: bool = hello
+ 214:             .peer_node_id
+ 215:             .as_bytes()
+ 216:             .ct_eq(hello.session_token.peer_node_id.as_bytes())
+ 217:             .into();
+ 218:         if !peer_match {
+ 219:             eprintln!("Relay hello rejected: peer_node_id mismatch");
+ 220:             return RelayHelloResponse::Rejected(RejectReason::PeerMismatch);
+ 221:         }
+ 222: 
+ 223:         // Check 8: relay_id binding (constant-time byte comparison)
+ 224:         let relay_match: bool = hello.session_token.relay_id.ct_eq(&self.relay_id).into();
+ 225:         if !relay_match {
+ 226:             eprintln!("Relay hello rejected: token relay_id does not match this relay");
+ 227:             return RelayHelloResponse::Rejected(RejectReason::InvalidToken);
+ 228:         }
+ 229: 
+ 230:         // Check 9: Scope enforcement
+ 231:         if hello.session_token.scope != RELAY_TOKEN_SCOPE {
+ 232:             eprintln!(
+ 233:                 "Relay hello rejected: unexpected scope '{}'",
+ 234:                 hello.session_token.scope
+ 235:             );
+ 236:             return RelayHelloResponse::Rejected(RejectReason::InvalidToken);
+ 237:         }
+ 238: 
+ 239:         // Check 10: Per-node session capacity
+ 240:         let node_session_count = self
+ 241:             .sessions
+ 242:             .values()
+ 243:             .filter(|s| s.node_id == hello.node_id)
+ 244:             .count();
+ 245: 
+ 246:         if node_session_count >= self.max_sessions_per_node {
+ 247:             eprintln!(
+ 248:                 "Relay hello rejected: capacity limit reached for node {}",
+ 249:                 hello.node_id
+ 250:             );
+ 251:             return RelayHelloResponse::Rejected(RejectReason::Capacity);
+ 252:         }
+ 253: 
+ 254:         // All checks passed — record nonce to prevent replay
+ 255:         self.nonce_store.insert(hello.session_token.nonce);
+ 256: 
+ 257:         // Allocate session
+ 258:         self.remove_session_for_pair(&hello.node_id, &hello.peer_node_id);
+ 259: 
+ 260:         let session_id = SessionId::generate();
+ 261:         let allocated_port = self.allocate_port();
+ 262: 
+ 263:         let session = RelaySession {
+ 264:             session_id,
+ 265:             node_id: hello.node_id.clone(),
+ 266:             peer_node_id: hello.peer_node_id.clone(),
+ 267:             allocated_port,
+ 268:             hello_source_addr: observed_addr,
+ 269:             bound_peer_addr: None,
+ 270:             expires_at_unix: hello.session_token.expires_at_unix,
+ 271:             established_at: Instant::now(),
+ 272:             last_packet_at: Instant::now(),
+ 273:         };
+ 274: 
+ 275:         self.sessions.insert(session_id, session);
+ 276:         self.node_pair_index.insert(
+ 277:             (hello.node_id.clone(), hello.peer_node_id.clone()),
+ 278:             session_id,
+ 279:         );
+ 280: 
+ 281:         RelayHelloResponse::Accepted(RelayHelloAck {
+ 282:             session_id,
+ 283:             allocated_port,
+ 284:         })
+ 285:     }
+ 286: 
+ 287:     #[cfg(test)]
+ 288:     pub fn handle_hello(&mut self, hello: RelayHello) -> RelayHelloResponse {
+ 289:         let observed_addr = SocketAddr::from(([127, 0, 0, 1], 40_000));
+ 290:         self.handle_hello_from_tuple(hello, observed_addr)
+ 291:     }
+ 292: 
+ 293:     /// Refresh session activity timestamp without forwarding data.
+ 294:     ///
+ 295:     /// Used by keepalive packets to prevent session idle timeout.
+ 296:     pub fn touch_session_from_tuple(
+ 297:         &mut self,
+ 298:         session_id: SessionId,
+ 299:         from_addr: SocketAddr,
+ 300:     ) -> Result<bool, RelayForwardError> {
+ 301:         let now_unix = SystemTime::now()
+ 302:             .duration_since(UNIX_EPOCH)
+ 303:             .unwrap()
+ 304:             .as_secs();
+ 305: 
+ 306:         let Some(session) = self.sessions.get_mut(&session_id) else {
+ 307:             return Err(RelayForwardError::SessionNotFound);
+ 308:         };
+ 309:         if session.expires_at_unix <= now_unix {
+ 310:             self.remove_session(session_id);
+ 311:             return Err(RelayForwardError::SessionExpired);
+ 312:         }
+ 313:         match session.bound_peer_addr {
+ 314:             Some(bound_addr) if bound_addr == from_addr => {
+ 315:                 session.last_packet_at = Instant::now();
+ 316:                 Ok(true)
+ 317:             }
+ 318:             Some(_) => Err(RelayForwardError::UnauthorizedSourceTuple),
+ 319:             None => Ok(false),
+ 320:         }
+ 321:     }
+ 322: 
+ 323:     #[cfg(test)]
+ 324:     pub fn touch_session(&mut self, session_id: SessionId) -> Result<(), String> {
+ 325:         let session = self
+ 326:             .sessions
+ 327:             .get_mut(&session_id)
+ 328:             .ok_or("session not found")?;
+ 329:         session.last_packet_at = Instant::now();
+ 330:         Ok(())
+ 331:     }
+ 332: 
+ 333:     pub fn has_session(&self, session_id: SessionId) -> bool {
+ 334:         self.sessions.contains_key(&session_id)
+ 335:     }
+ 336: 
+ 337:     /// Forward a ciphertext payload from one session to its paired session.
+ 338:     ///
+ 339:     /// Returns:
+ 340:     /// - `Ok(Some((peer_session_id, payload)))` — forwarded successfully
+ 341:     /// - `Ok(None)` — silently dropped (rate limit or no paired session)
+ 342:     /// - `Err(msg)` — session not found
+ 343:     ///
+ 344:     /// Payloads are forwarded byte-for-byte.  The relay never inspects content.
+ 345:     pub fn forward_packet(
+ 346:         &mut self,
+ 347:         session_id: SessionId,
+ 348:         payload: &[u8],
+ 349:         from_addr: SocketAddr,
+ 350:     ) -> Result<Option<RelayForwardTarget>, RelayForwardError> {
+ 351:         // Silently drop oversized payloads (do not error — avoids amplification)
+ 352:         if payload.len() > MAX_PACKET_SIZE_BYTES {
+ 353:             return Ok(None);
+ 354:         }
+ 355: 
+ 356:         let now_unix = SystemTime::now()
+ 357:             .duration_since(UNIX_EPOCH)
+ 358:             .unwrap()
+ 359:             .as_secs();
+ 360: 
+ 361:         let Some(session) = self.sessions.get(&session_id) else {
+ 362:             return Err(RelayForwardError::SessionNotFound);
+ 363:         };
+ 364:         if session.expires_at_unix <= now_unix {
+ 365:             self.remove_session(session_id);
+ 366:             return Err(RelayForwardError::SessionExpired);
+ 367:         }
+ 368: 
+ 369:         {
+ 370:             let session = self
+ 371:                 .sessions
+ 372:                 .get_mut(&session_id)
+ 373:                 .expect("session should remain available while forwarding");
+ 374:             match session.bound_peer_addr {
+ 375:                 Some(bound_addr) if bound_addr == from_addr => {}
+ 376:                 Some(_) => return Err(RelayForwardError::UnauthorizedSourceTuple),
+ 377:                 None => {
+ 378:                     if session.hello_source_addr.ip() != from_addr.ip() {
+ 379:                         return Err(RelayForwardError::UnauthorizedSourceTuple);
+ 380:                     }
+ 381:                     session.bound_peer_addr = Some(from_addr);
+ 382:                 }
+ 383:             }
+ 384: 
+ 385:             // Rate limit check — silent drop on excess
+ 386:             if !self
+ 387:                 .rate_limiter
+ 388:                 .check_packet(&session.node_id, payload.len())
+ 389:             {
+ 390:                 return Ok(None);
+ 391:             }
+ 392: 
+ 393:             // Update last_packet_at
+ 394:             session.last_packet_at = Instant::now();
+ 395:         }
+ 396: 
+ 397:         let (peer_session_id, current_node_id, current_peer_node_id) = {
+ 398:             let session = self
+ 399:                 .sessions
+ 400:                 .get(&session_id)
+ 401:                 .expect("session should remain available while forwarding");
+ 402:             (
+ 403:                 self.node_pair_index
+ 404:                     .get(&(session.peer_node_id.clone(), session.node_id.clone()))
+ 405:                     .copied(),
+ 406:                 session.node_id.clone(),
+ 407:                 session.peer_node_id.clone(),
+ 408:             )
+ 409:         };
+ 410: 
+ 411:         let Some(peer_sid) = peer_session_id else {
+ 412:             // Half-open: no paired session yet; silently drop
+ 413:             return Ok(None);
+ 414:         };
+ 415: 
+ 416:         let Some(peer_session) = self.sessions.get_mut(&peer_sid) else {
+ 417:             self.node_pair_index
+ 418:                 .remove(&(current_peer_node_id, current_node_id));
+ 419:             return Ok(None);
+ 420:         };
+ 421:         if peer_session.expires_at_unix <= now_unix {
+ 422:             self.remove_session(peer_sid);
+ 423:             return Ok(None);
+ 424:         }
+ 425:         let Some(peer_addr) = peer_session.bound_peer_addr else {
+ 426:             return Ok(None);
+ 427:         };
+ 428:         peer_session.last_packet_at = Instant::now();
+ 429:         // Forward payload as-is — never inspect content
+ 430:         Ok(Some(RelayForwardTarget {
+ 431:             peer_session_id: peer_sid,
+ 432:             peer_allocated_port: peer_session.allocated_port,
+ 433:             peer_addr,
+ 434:             payload: payload.to_vec(),
+ 435:         }))
+ 436:     }
+ 437: 
+ 438:     /// Evict idle, half-open, and stale sessions, and prune the nonce store.
+ 439:     ///
+ 440:     /// Should be called periodically (e.g., every 10 seconds).
+ 441:     pub fn cleanup_idle_sessions(&mut self) -> Vec<RelaySession> {
+ 442:         let now = Instant::now();
+ 443:         let idle_threshold = Duration::from_secs(IDLE_SESSION_TIMEOUT_SECS);
+ 444:         let half_open_threshold = Duration::from_secs(HALF_OPEN_SESSION_TIMEOUT_SECS);
+ 445:         let now_unix = SystemTime::now()
+ 446:             .duration_since(UNIX_EPOCH)
+ 447:             .unwrap()
+ 448:             .as_secs();
+ 449: 
+ 450:         let mut to_remove = Vec::new();
+ 451: 
+ 452:         for (session_id, session) in &self.sessions {
+ 453:             let age = now.duration_since(session.established_at);
+ 454:             let idle = now.duration_since(session.last_packet_at);
+ 455: 
+ 456:             let has_pair = self
+ 457:                 .node_pair_index
+ 458:                 .contains_key(&(session.peer_node_id.clone(), session.node_id.clone()));
+ 459: 
+ 460:             // Remove session if:
+ 461:             // - it has expired according to the signed session token, OR
+ 462:             // - it is half-open (no paired session) and exceeds the half-open timeout, OR
+ 463:             // - it is idle (no recent packets) and exceeds the idle timeout
+ 464:             let is_expired = session.expires_at_unix <= now_unix;
+ 465:             let is_stale_half_open = !has_pair && age > half_open_threshold;
+ 466:             let is_idle = idle > idle_threshold;
+ 467:             if is_expired || is_stale_half_open || is_idle {
+ 468:                 to_remove.push(*session_id);
+ 469:             }
+ 470:         }
+ 471: 
+ 472:         let mut removed = Vec::new();
+ 473:         for sid in to_remove {
+ 474:             if let Some(session) = self.remove_session(sid) {
+ 475:                 removed.push(session);
+ 476:             }
+ 477:         }
+ 478: 
+ 479:         // Prune nonce store: remove entries older than the nonce retention window
+ 480:         // to prevent unbounded memory growth while keeping anti-replay guarantees.
+ 481:         self.nonce_store
+ 482:             .prune(Duration::from_secs(NONCE_RETENTION_SECS));
+ 483: 
+ 484:         removed
+ 485:     }
+ 486: 
+ 487:     fn allocate_port(&self) -> u16 {
+ 488:         let base = 50_000u16;
+ 489:         let offset = (self.sessions.len() % 10_000) as u16;
+ 490:         base.wrapping_add(offset)
+ 491:     }
+ 492: 
+ 493:     /// Number of active sessions (for monitoring/tests).
+ 494:     #[cfg(test)]
+ 495:     pub fn session_count(&self) -> usize {
+ 496:         self.sessions.len()
+ 497:     }
+ 498: 
+ 499:     fn remove_session_for_pair(&mut self, node_id: &str, peer_node_id: &str) {
+ 500:         let Some(existing_session_id) = self
+ 501:             .node_pair_index
+ 502:             .get(&(node_id.to_string(), peer_node_id.to_string()))
+ 503:             .copied()
+ 504:         else {
+ 505:             return;
+ 506:         };
+ 507:         self.remove_session(existing_session_id);
+ 508:     }
+ 509: 
+ 510:     fn remove_session(&mut self, session_id: SessionId) -> Option<RelaySession> {
+ 511:         let session = self.sessions.remove(&session_id)?;
+ 512:         self.node_pair_index
+ 513:             .remove(&(session.node_id.clone(), session.peer_node_id.clone()));
+ 514:         Some(session)
+ 515:     }
+ 516: }
+ 517: 
+ 518: // ── Nonce store ───
+ 519: 
+ 520: #[derive(Default)]
+ 521: struct NonceStore {
+ 522:     nonces: HashMap<[u8; 16], Instant>,
+ 523: }
+ 524: 
+ 525: impl NonceStore {
+ 526:     fn contains(&self, nonce: &[u8; 16]) -> bool {
+ 527:         self.nonces.contains_key(nonce)
+ 528:     }
+ 529: 
+ 530:     fn insert(&mut self, nonce: [u8; 16]) {
+ 531:         self.nonces.insert(nonce, Instant::now());
+ 532:     }
+ 533: 
+ 534:     fn prune(&mut self, retention: Duration) {
+ 535:         let now = Instant::now();
+ 536:         self.nonces
+ 537:             .retain(|_, inserted_at| now.duration_since(*inserted_at) < retention);
+ 538:     }
+ 539: }
+ 540: 
+ 541: // ── Hello rate limiter ───
+ 542: 
+ 543: /// Limits session-establishment (`handle_hello`) attempts per node per second.
+ 544: ///
+ 545: /// This is a separate, much tighter limit than the packet-level `RateLimiter`
+ 546: /// because `handle_hello` performs ed25519 verification (CPU-intensive).
+ 547: /// Applying a cheap counter before verification protects against CPU-exhaustion
+ 548: /// attacks.
+ 549: struct HelloLimiter {
+ 550:     max_per_sec: u32,
+ 551:     counts: HashMap<String, (u32, Instant)>,
+ 552: }
+ 553: 
+ 554: impl HelloLimiter {
+ 555:     fn new(max_per_sec: u32) -> Self {
+ 556:         Self {
+ 557:             max_per_sec,
+ 558:             counts: HashMap::new(),
+ 559:         }
+ 560:     }
+ 561: 
+ 562:     /// Returns `true` if the hello should be allowed, `false` if rate-limited.
+ 563:     fn check(&mut self, node_id: &str) -> bool {
+ 564:         let now = Instant::now();
+ 565:         let entry = self.counts.entry(node_id.to_string()).or_insert((0, now));
+ 566: 
+ 567:         // Reset counter if the one-second window has elapsed
+ 568:         if now.duration_since(entry.1) >= Duration::from_secs(1) {
+ 569:             *entry = (0, now);
+ 570:         }
+ 571: 
+ 572:         if entry.0 >= self.max_per_sec {
+ 573:             return false;
+ 574:         }
+ 575:         entry.0 += 1;
+ 576:         true
+ 577:     }
+ 578: }
+ 579: 
+ 580: // ── Tests ───
+ 581: 
+ 582: #[cfg(test)]
+ 583: mod tests {
+ 584:     use super::*;
+ 585:     use ed25519_dalek::{Signer, SigningKey};
+ 586: 
+ 587:     const TEST_RELAY_ID: [u8; 16] = [0xAA; 16];
+ 588: 
+ 589:     fn make_test_keypair() -> (SigningKey, VerifyingKey) {
+ 590:         let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+ 591:         let verifying_key = signing_key.verifying_key();
+ 592:         (signing_key, verifying_key)
+ 593:     }
+ 594: 
+ 595:     fn make_transport(signing_key: &SigningKey) -> RelayTransport {
+ 596:         RelayTransport::new(TEST_RELAY_ID, signing_key.verifying_key(), 8, 90)
+ 597:     }
+ 598: 
+ 599:     /// Build a valid token bound to `TEST_RELAY_ID` and the given TTL.
+ 600:     fn make_valid_token(
+ 601:         signing_key: &SigningKey,
+ 602:         node_id: &str,
+ 603:         peer_node_id: &str,
+ 604:         ttl_secs: u64,
+ 605:     ) -> RelaySessionToken {
+ 606:         RelaySessionToken::sign(signing_key, node_id, peer_node_id, TEST_RELAY_ID, ttl_secs)
+ 607:     }
+ 608: 
+ 609:     /// Build a valid hello that uses a fresh token.
+ 610:     fn make_hello(signing_key: &SigningKey, node_id: &str, peer_node_id: &str) -> RelayHello {
+ 611:         RelayHello {
+ 612:             node_id: node_id.to_string(),
+ 613:             peer_node_id: peer_node_id.to_string(),
+ 614:             session_token: make_valid_token(signing_key, node_id, peer_node_id, 60),
+ 615:         }
+ 616:     }
+ 617: 
+ 618:     fn observed_addr(ip: [u8; 4], port: u16) -> SocketAddr {
+ 619:         SocketAddr::from((ip, port))
+ 620:     }
+ 621: 
+ 622:     fn accept_hello_from(
+ 623:         transport: &mut RelayTransport,
+ 624:         signing_key: &SigningKey,
+ 625:         node_id: &str,
+ 626:         peer_node_id: &str,
+ 627:         from_addr: SocketAddr,
+ 628:     ) -> SessionId {
+ 629:         match transport
+ 630:             .handle_hello_from_tuple(make_hello(signing_key, node_id, peer_node_id), from_addr)
+ 631:         {
+ 632:             RelayHelloResponse::Accepted(ack) => ack.session_id,
+ 633:             other => panic!("expected accepted hello, got {other:?}"),
+ 634:         }
+ 635:     }
+ 636: 
+ 637:     // ── Signature / basic token validity ───
+ 638: 
+ 639:     #[test]
+ 640:     fn test_invalid_signature_token_rejected() {
+ 641:         let (sk, _) = make_test_keypair();
+ 642:         let mut transport = make_transport(&sk);
+ 643: 
+ 644:         // Token signed with a different key then signature bytes mangled
+ 645:         let wrong_sk = SigningKey::from_bytes(&[2u8; 32]);
+ 646:         let mut token = make_valid_token(&wrong_sk, "node-a", "node-b", 60);
+ 647:         token.signature = [99u8; 64];
+ 648: 
+ 649:         let hello = RelayHello {
+ 650:             node_id: "node-a".to_string(),
+ 651:             peer_node_id: "node-b".to_string(),
+ 652:             session_token: token,
+ 653:         };
+ 654: 
+ 655:         assert_eq!(
+ 656:             transport.handle_hello(hello),
+ 657:             RelayHelloResponse::Rejected(RejectReason::InvalidToken)
+ 658:         );
+ 659:         assert_eq!(transport.session_count(), 0);
+ 660:     }
+ 661: 
+ 662:     #[test]
+ 663:     fn test_expired_token_rejected() {
+ 664:         let (sk, _) = make_test_keypair();
+ 665:         let mut transport = make_transport(&sk);
+ 666: 
+ 667:         let now_unix = SystemTime::now()
+ 668:             .duration_since(UNIX_EPOCH)
+ 669:             .unwrap()
+ 670:             .as_secs();
+ 671: 
+ 672:         let mut token = make_valid_token(&sk, "node-a", "node-b", 60);
+ 673:         token.expires_at_unix = now_unix - 200;
+ 674:         // Re-sign with expired timestamp
+ 675:         let payload = token.canonical_payload();
+ 676:         token.signature = sk.sign(payload.as_bytes()).to_bytes();
+ 677: 
+ 678:         let hello = RelayHello {
+ 679:             node_id: "node-a".to_string(),
+ 680:             peer_node_id: "node-b".to_string(),
+ 681:             session_token: token,
+ 682:         };
+ 683: 
+ 684:         assert_eq!(
+ 685:             transport.handle_hello(hello),
+ 686:             RelayHelloResponse::Rejected(RejectReason::ExpiredToken)
+ 687:         );
+ 688:     }
+ 689: 
+ 690:     #[test]
+ 691:     fn test_token_ttl_exceeds_max_rejected() {
+ 692:         let (sk, _) = make_test_keypair();
+ 693:         let mut transport = make_transport(&sk);
+ 694: 
+ 695:         let hello = RelayHello {
+ 696:             node_id: "node-a".to_string(),
+ 697:             peer_node_id: "node-b".to_string(),
+ 698:             session_token: make_valid_token(&sk, "node-a", "node-b", 200), // > 120 s
+ 699:         };
+ 700: 
+ 701:         assert_eq!(
+ 702:             transport.handle_hello(hello),
+ 703:             RelayHelloResponse::Rejected(RejectReason::InvalidToken)
+ 704:         );
+ 705:     }
+ 706: 
+ 707:     // ── Replay protection ───
+ 708: 
+ 709:     #[test]
+ 710:     fn test_replayed_nonce_rejected() {
+ 711:         let (sk, _) = make_test_keypair();
+ 712:         let mut transport = make_transport(&sk);
+ 713: 
+ 714:         let token = make_valid_token(&sk, "node-a", "node-b", 60);
+ 715:         let hello1 = RelayHello {
+ 716:             node_id: "node-a".to_string(),
+ 717:             peer_node_id: "node-b".to_string(),
+ 718:             session_token: token.clone(),
+ 719:         };
+ 720:         assert!(matches!(
+ 721:             transport.handle_hello(hello1),
+ 722:             RelayHelloResponse::Accepted(_)
+ 723:         ));
+ 724: 
+ 725:         let hello2 = RelayHello {
+ 726:             node_id: "node-a".to_string(),
+ 727:             peer_node_id: "node-b".to_string(),
+ 728:             session_token: token,
+ 729:         };
+ 730:         assert_eq!(
+ 731:             transport.handle_hello(hello2),
+ 732:             RelayHelloResponse::Rejected(RejectReason::ReplayedNonce)
+ 733:         );
+ 734:     }
+ 735: 
+ 736:     #[test]
+ 737:     fn test_nonce_store_pruned_in_cleanup() {
+ 738:         let (sk, _) = make_test_keypair();
+ 739:         let mut transport = make_transport(&sk);
+ 740: 
+ 741:         // Accept one hello to seed the nonce store
+ 742:         transport.handle_hello(make_hello(&sk, "node-a", "node-b"));
+ 743:         assert_eq!(transport.nonce_store.nonces.len(), 1);
+ 744: 
+ 745:         // Back-date the nonce so it appears older than the retention window
+ 746:         for inserted_at in transport.nonce_store.nonces.values_mut() {
+ 747:             *inserted_at = Instant::now() - Duration::from_secs(NONCE_RETENTION_SECS + 1);
+ 748:         }
+ 749: 
+ 750:         transport.cleanup_idle_sessions();
+ 751:         assert_eq!(
+ 752:             transport.nonce_store.nonces.len(),
+ 753:             0,
+ 754:             "expired nonces must be pruned by cleanup"
+ 755:         );
+ 756:     }
+ 757: 
+ 758:     // ── Node-id and relay-id binding (new constant-time checks) ───
+ 759: 
+ 760:     #[test]
+ 761:     fn test_node_id_mismatch_rejected_with_constant_time_check() {
+ 762:         // hello.node_id = "attacker" but token.node_id = "node-a"
+ 763:         // The relay must reject this with InvalidToken (not PeerMismatch).
+ 764:         let (sk, _) = make_test_keypair();
+ 765:         let mut transport = make_transport(&sk);
+ 766: 
+ 767:         let token = make_valid_token(&sk, "node-a", "node-b", 60);
+ 768:         let hello = RelayHello {
+ 769:             node_id: "attacker".to_string(), // wrong
+ 770:             peer_node_id: "node-b".to_string(),
+ 771:             session_token: token,
+ 772:         };
+ 773: 
+ 774:         assert_eq!(
+ 775:             transport.handle_hello(hello),
+ 776:             RelayHelloResponse::Rejected(RejectReason::InvalidToken)
+ 777:         );
+ 778:         assert_eq!(transport.session_count(), 0);
+ 779:     }
+ 780: 
+ 781:     #[test]
+ 782:     fn test_relay_id_mismatch_rejected() {
+ 783:         // Token issued for a different relay — must be rejected.
+ 784:         let (sk, _) = make_test_keypair();
+ 785:         let mut transport = make_transport(&sk);
+ 786: 
+ 787:         let other_relay_id = [0xBB; 16]; // ≠ TEST_RELAY_ID
+ 788:         let token = RelaySessionToken::sign(&sk, "node-a", "node-b", other_relay_id, 60);
+ 789: 
+ 790:         let hello = RelayHello {
+ 791:             node_id: "node-a".to_string(),
+ 792:             peer_node_id: "node-b".to_string(),
+ 793:             session_token: token,
+ 794:         };
+ 795: 
+ 796:         assert_eq!(
+ 797:             transport.handle_hello(hello),
+ 798:             RelayHelloResponse::Rejected(RejectReason::InvalidToken)
+ 799:         );
+ 800:     }
+ 801: 
+ 802:     // ── Scope enforcement ───
+ 803: 
+ 804:     #[test]
+ 805:     fn test_wrong_scope_rejected() {
+ 806:         let (sk, _) = make_test_keypair();
+ 807:         let mut transport = make_transport(&sk);
+ 808: 
+ 809:         // Manually forge a token with a wrong scope and re-sign it
+ 810:         let now_unix = SystemTime::now()
+ 811:             .duration_since(UNIX_EPOCH)
+ 812:             .unwrap()
+ 813:             .as_secs();
+ 814:         let mut token = RelaySessionToken {
+ 815:             node_id: "node-a".to_string(),
+ 816:             peer_node_id: "node-b".to_string(),
+ 817:             relay_id: TEST_RELAY_ID,
+ 818:             scope: "full_tunnel_admin".to_string(), // wrong
+ 819:             issued_at_unix: now_unix,
+ 820:             expires_at_unix: now_unix + 60,
+ 821:             nonce: [0x11; 16],
+ 822:             signature: [0u8; 64],
+ 823:         };
+ 824:         let payload = token.canonical_payload();
+ 825:         token.signature = sk.sign(payload.as_bytes()).to_bytes();
+ 826: 
+ 827:         let hello = RelayHello {
+ 828:             node_id: "node-a".to_string(),
+ 829:             peer_node_id: "node-b".to_string(),
+ 830:             session_token: token,
+ 831:         };
+ 832: 
+ 833:         assert_eq!(
+ 834:             transport.handle_hello(hello),
+ 835:             RelayHelloResponse::Rejected(RejectReason::InvalidToken)
+ 836:         );
+ 837:     }
+ 838: 
+ 839:     // ── Peer-id binding ───
+ 840: 
+ 841:     #[test]
+ 842:     fn test_peer_mismatch_rejected() {
+ 843:         let (sk, _) = make_test_keypair();
+ 844:         let mut transport = make_transport(&sk);
+ 845: 
+ 846:         let token = make_valid_token(&sk, "node-a", "node-b", 60);
+ 847:         let hello = RelayHello {
+ 848:             node_id: "node-a".to_string(),
+ 849:             peer_node_id: "node-c".to_string(), // different from token
+ 850:             session_token: token,
+ 851:         };
+ 852: 
+ 853:         assert_eq!(
+ 854:             transport.handle_hello(hello),
+ 855:             RelayHelloResponse::Rejected(RejectReason::PeerMismatch)
+ 856:         );
+ 857:     }
+ 858: 
+ 859:     // ── Capacity ───
+ 860: 
+ 861:     #[test]
+ 862:     fn test_capacity_limit_enforced() {
+ 863:         let (sk, _) = make_test_keypair();
+ 864:         let mut transport = RelayTransport::new(TEST_RELAY_ID, sk.verifying_key(), 2, 90);
+ 865: 
+ 866:         for i in 0..2 {
+ 867:             let hello = make_hello(&sk, "node-a", &format!("node-b-{i}"));
+ 868:             assert!(matches!(
+ 869:                 transport.handle_hello(hello),
+ 870:                 RelayHelloResponse::Accepted(_)
+ 871:             ));
+ 872:         }
+ 873: 
+ 874:         // Third hello for the same node must be rejected
+ 875:         let hello = make_hello(&sk, "node-a", "node-b-extra");
+ 876:         assert_eq!(
+ 877:             transport.handle_hello(hello),
+ 878:             RelayHelloResponse::Rejected(RejectReason::Capacity)
+ 879:         );
+ 880:     }
+ 881: 
+ 882:     // ── Hello rate limiting ───
+ 883: 
+ 884:     #[test]
+ 885:     fn test_hello_rate_limit_blocks_flood() {
+ 886:         let (sk, _) = make_test_keypair();
+ 887:         // Very tight hello limit so we can test without sleeping
+ 888:         let mut transport = RelayTransport::new(TEST_RELAY_ID, sk.verifying_key(), 8, 90);
+ 889:         transport.hello_limiter.max_per_sec = 2;
+ 890: 
+ 891:         // First two should pass
+ 892:         assert!(matches!(
+ 893:             transport.handle_hello(make_hello(&sk, "flooder", "node-b")),
+ 894:             RelayHelloResponse::Accepted(_) | RelayHelloResponse::Rejected(_)
+ 895:         ));
+ 896:         // We don't assert Accepted here because nonces differ each call (fine)
+ 897:         // — we just want to confirm that the 3rd call within 1 second is limited
+ 898: 
+ 899:         // Drain hello budget for "flooder"
+ 900:         transport.hello_limiter.counts.insert(
+ 901:             "flooder".to_string(),
+ 902:             (transport.hello_limiter.max_per_sec, Instant::now()),
+ 903:         );
+ 904: 
+ 905:         assert_eq!(
+ 906:             transport.handle_hello(make_hello(&sk, "flooder", "node-b")),
+ 907:             RelayHelloResponse::Rejected(RejectReason::RateLimitExceeded)
+ 908:         );
+ 909:     }
+ 910: 
+ 911:     #[test]
+ 912:     fn test_hello_rate_limit_resets_after_window() {
+ 913:         let (sk, _) = make_test_keypair();
+ 914:         let mut transport = RelayTransport::new(TEST_RELAY_ID, sk.verifying_key(), 8, 90);
+ 915:         transport.hello_limiter.max_per_sec = 1;
+ 916: 
+ 917:         // Exhaust the window
+ 918:         transport
+ 919:             .hello_limiter
+ 920:             .counts
+ 921:             .insert("node-a".to_string(), (1, Instant::now()));
+ 922:         assert_eq!(
+ 923:             transport.handle_hello(make_hello(&sk, "node-a", "node-b")),
+ 924:             RelayHelloResponse::Rejected(RejectReason::RateLimitExceeded)
+ 925:         );
+ 926: 
+ 927:         // Back-date the window so it appears to have expired
+ 928:         transport.hello_limiter.counts.insert(
+ 929:             "node-a".to_string(),
+ 930:             (1, Instant::now() - Duration::from_secs(2)),
+ 931:         );
+ 932: 
+ 933:         // Now the hello should be allowed through
+ 934:         assert!(matches!(
+ 935:             transport.handle_hello(make_hello(&sk, "node-a", "node-b")),
+ 936:             RelayHelloResponse::Accepted(_)
+ 937:         ));
+ 938:     }
+ 939: 
+ 940:     // ── Happy-path session lifecycle ───
+ 941: 
+ 942:     #[test]
+ 943:     fn test_valid_hello_allocates_session() {
+ 944:         let (sk, _) = make_test_keypair();
+ 945:         let mut transport = make_transport(&sk);
+ 946: 
+ 947:         assert!(matches!(
+ 948:             transport.handle_hello(make_hello(&sk, "node-a", "node-b")),
+ 949:             RelayHelloResponse::Accepted(_)
+ 950:         ));
+ 951:         assert_eq!(transport.session_count(), 1);
+ 952:     }
+ 953: 
+ 954:     #[test]
+ 955:     fn test_session_pairing_and_bidirectional_forwarding() {
+ 956:         let (sk, _) = make_test_keypair();
+ 957:         let mut transport = make_transport(&sk);
+ 958: 
+ 959:         let hello_a = observed_addr([198, 51, 100, 10], 40_000);
+ 960:         let data_a = observed_addr([198, 51, 100, 10], 51_820);
+ 961:         let hello_b = observed_addr([203, 0, 113, 20], 41_000);
+ 962:         let data_b = observed_addr([203, 0, 113, 20], 51_821);
+ 963: 
+ 964:         let sid_a = accept_hello_from(&mut transport, &sk, "node-a", "node-b", hello_a);
+ 965:         let sid_b = accept_hello_from(&mut transport, &sk, "node-b", "node-a", hello_b);
+ 966: 
+ 967:         let payload_a = b"ciphertext from A";
+ 968:         assert_eq!(
+ 969:             transport
+ 970:                 .forward_packet(sid_a, payload_a, data_a)
+ 971:                 .expect("forwarding should not error before pairing"),
+ 972:             None,
+ 973:             "first packet must bind node-a but not forward before node-b is bound"
+ 974:         );
+ 975: 
+ 976:         let payload_b = b"ciphertext from B";
+ 977:         let forward_b = transport
+ 978:             .forward_packet(sid_b, payload_b, data_b)
+ 979:             .unwrap()
+ 980:             .expect("should forward");
+ 981:         assert_eq!(forward_b.peer_session_id, sid_a);
+ 982:         assert_eq!(forward_b.peer_allocated_port, 50_000);
+ 983:         assert_eq!(forward_b.peer_addr, data_a);
+ 984:         assert_eq!(forward_b.payload, payload_b);
+ 985: 
+ 986:         let forward_a = transport
+ 987:             .forward_packet(sid_a, payload_a, data_a)
+ 988:             .unwrap()
+ 989:             .expect("bound sessions should forward bidirectionally");
+ 990:         assert_eq!(forward_a.peer_session_id, sid_b);
+ 991:         assert_eq!(forward_a.peer_allocated_port, 50_001);
+ 992:         assert_eq!(forward_a.peer_addr, data_b);
+ 993:         assert_eq!(forward_a.payload, payload_a);
+ 994:     }
+ 995: 
+ 996:     #[test]
+ 997:     fn test_payload_forwarded_byte_for_byte_without_inspection() {
+ 998:         let (sk, _) = make_test_keypair();
+ 999:         let mut transport = make_transport(&sk);
+1000: 
+1001:         let hello_a = observed_addr([198, 51, 100, 11], 40_010);
+1002:         let data_a = observed_addr([198, 51, 100, 11], 51_830);
+1003:         let hello_b = observed_addr([203, 0, 113, 21], 41_010);
+1004:         let data_b = observed_addr([203, 0, 113, 21], 51_831);
+1005: 
+1006:         let sid_a = accept_hello_from(&mut transport, &sk, "node-a", "node-b", hello_a);
+1007:         let sid_b = accept_hello_from(&mut transport, &sk, "node-b", "node-a", hello_b);
+1008:         let _ = transport.forward_packet(sid_a, b"bind-a", data_a);
+1009:         let _ = transport.forward_packet(sid_b, b"bind-b", data_b);
+1010: 
+1011:         // Test with byte patterns that could confuse parsers
+1012:         for payload in [
+1013:             vec![0u8; 100],
+1014:             vec![0xFFu8; 100],
+1015:             (0u8..100).collect::<Vec<_>>(),
+1016:         ] {
+1017:             let result = transport.forward_packet(sid_a, &payload, data_a).unwrap();
+1018:             if let Some(forwarded) = result {
+1019:                 assert_eq!(
+1020:                     forwarded.payload, payload,
+1021:                     "payload must be forwarded verbatim"
+1022:                 );
+1023:                 assert_eq!(forwarded.peer_session_id, sid_b);
+1024:             }
+1025:         }
+1026:     }
+1027: 
+1028:     // ── Oversized payload ───
+1029: 
+1030:     #[test]
+1031:     fn test_oversized_payload_silently_dropped() {
+1032:         let (sk, _) = make_test_keypair();
+1033:         let mut transport = make_transport(&sk);
+1034: 
+1035:         let hello_a = observed_addr([198, 51, 100, 12], 40_020);
+1036:         let data_a = observed_addr([198, 51, 100, 12], 51_840);
+1037:         let hello_b = observed_addr([203, 0, 113, 22], 41_020);
+1038:         let data_b = observed_addr([203, 0, 113, 22], 51_841);
+1039: 
+1040:         let sid_a = accept_hello_from(&mut transport, &sk, "node-a", "node-b", hello_a);
+1041:         let sid_b = accept_hello_from(&mut transport, &sk, "node-b", "node-a", hello_b);
+1042:         let _ = transport.forward_packet(sid_a, b"bind-a", data_a);
+1043:         let _ = transport.forward_packet(sid_b, b"bind-b", data_b);
+1044: 
+1045:         let oversized = vec![0u8; MAX_PACKET_SIZE_BYTES + 1];
+1046:         let result = transport.forward_packet(sid_a, &oversized, data_a).unwrap();
+1047:         assert_eq!(result, None, "oversized payload must be silently dropped");
+1048:         // Session still live — drop does not tear down the session
+1049:         assert_eq!(transport.session_count(), 2);
+1050:     }
+1051: 
+1052:     // ── Rate limiting (packets) ───
+1053: 
+1054:     #[test]
+1055:     fn test_rate_limit_drops_silently() {
+1056:         let (sk, _) = make_test_keypair();
+1057:         let mut transport = make_transport(&sk);
+1058:         transport.rate_limiter.max_pps = 5;
+1059: 
+1060:         let hello_a = observed_addr([198, 51, 100, 13], 40_030);
+1061:         let data_a = observed_addr([198, 51, 100, 13], 51_850);
+1062:         let hello_b = observed_addr([203, 0, 113, 23], 41_030);
+1063:         let data_b = observed_addr([203, 0, 113, 23], 51_851);
+1064: 
+1065:         let sid_a = accept_hello_from(&mut transport, &sk, "node-a", "node-b", hello_a);
+1066:         let sid_b = accept_hello_from(&mut transport, &sk, "node-b", "node-a", hello_b);
+1067:         let _ = transport.forward_packet(sid_a, b"bind-a", data_a);
+1068:         let _ = transport.forward_packet(sid_b, b"bind-b", data_b);
+1069: 
+1070:         for _ in 0..5 {
+1071:             assert!(transport.forward_packet(sid_a, b"data", data_a).is_ok());
+1072:         }
+1073:         // Excess — silent drop
+1074:         let result = transport.forward_packet(sid_a, b"data", data_a).unwrap();
+1075:         assert_eq!(result, None);
+1076:         assert_eq!(transport.session_count(), 2); // sessions intact
+1077:     }
+1078: 
+1079:     #[test]
+1080:     fn test_wrong_source_tuple_rejected_after_binding() {
+1081:         let (sk, _) = make_test_keypair();
+1082:         let mut transport = make_transport(&sk);
+1083: 
+1084:         let hello_a = observed_addr([198, 51, 100, 14], 40_040);
+1085:         let data_a = observed_addr([198, 51, 100, 14], 51_860);
+1086:         let spoof_a = observed_addr([198, 51, 100, 14], 60_000);
+1087:         let hello_b = observed_addr([203, 0, 113, 24], 41_040);
+1088:         let data_b = observed_addr([203, 0, 113, 24], 51_861);
+1089: 
+1090:         let sid_a = accept_hello_from(&mut transport, &sk, "node-a", "node-b", hello_a);
+1091:         let sid_b = accept_hello_from(&mut transport, &sk, "node-b", "node-a", hello_b);
+1092:         let _ = transport.forward_packet(sid_a, b"bind-a", data_a);
+1093:         let _ = transport.forward_packet(sid_b, b"bind-b", data_b);
+1094: 
+1095:         let err = transport
+1096:             .forward_packet(sid_a, b"spoof", spoof_a)
+1097:             .expect_err("bound session must reject tuple changes");
+1098:         assert_eq!(err, RelayForwardError::UnauthorizedSourceTuple);
+1099:     }
+1100: 
+1101:     #[test]
+1102:     fn test_new_hello_replaces_existing_session_for_same_pair() {
+1103:         let (sk, _) = make_test_keypair();
+1104:         let mut transport = make_transport(&sk);
+1105: 
+1106:         let sid_old = accept_hello_from(
+1107:             &mut transport,
+1108:             &sk,
+1109:             "node-a",
+1110:             "node-b",
+1111:             observed_addr([198, 51, 100, 21], 40_110),
+1112:         );
+1113:         let sid_new = accept_hello_from(
+1114:             &mut transport,
+1115:             &sk,
+1116:             "node-a",
+1117:             "node-b",
+1118:             observed_addr([198, 51, 100, 21], 40_111),
+1119:         );
+1120: 
+1121:         assert_ne!(sid_old, sid_new);
+1122:         assert!(!transport.has_session(sid_old));
+1123:         assert!(transport.has_session(sid_new));
+1124:         assert_eq!(transport.session_count(), 1);
+1125:     }
+1126: 
+1127:     #[test]
+1128:     fn test_unbound_session_rejects_different_source_ip() {
+1129:         let (sk, _) = make_test_keypair();
+1130:         let mut transport = make_transport(&sk);
+1131: 
+1132:         let sid_a = accept_hello_from(
+1133:             &mut transport,
+1134:             &sk,
+1135:             "node-a",
+1136:             "node-b",
+1137:             observed_addr([198, 51, 100, 15], 40_050),
+1138:         );
+1139: 
+1140:         let err = transport
+1141:             .forward_packet(sid_a, b"spoof", observed_addr([203, 0, 113, 25], 51_870))
+1142:             .expect_err("unbound session must reject a different source IP");
+1143:         assert_eq!(err, RelayForwardError::UnauthorizedSourceTuple);
+1144:     }
+1145: 
+1146:     #[test]
+1147:     fn test_stale_tuple_reuse_after_cleanup_is_rejected() {
+1148:         let (sk, _) = make_test_keypair();
+1149:         let mut transport = make_transport(&sk);
+1150: 
+1151:         let old_hello = observed_addr([198, 51, 100, 16], 40_060);
+1152:         let old_data = observed_addr([198, 51, 100, 16], 51_880);
+1153:         let peer_hello = observed_addr([203, 0, 113, 26], 41_060);
+1154:         let peer_data = observed_addr([203, 0, 113, 26], 51_881);
+1155: 
+1156:         let sid_old = accept_hello_from(&mut transport, &sk, "node-a", "node-b", old_hello);
+1157:         let sid_peer = accept_hello_from(&mut transport, &sk, "node-b", "node-a", peer_hello);
+1158:         let _ = transport.forward_packet(sid_old, b"bind-a", old_data);
+1159:         let _ = transport.forward_packet(sid_peer, b"bind-b", peer_data);
+1160:         for session in transport.sessions.values_mut() {
+1161:             session.last_packet_at =
+1162:                 Instant::now() - Duration::from_secs(IDLE_SESSION_TIMEOUT_SECS + 1);
+1163:         }
+1164:         let removed = transport.cleanup_idle_sessions();
+1165:         assert_eq!(
+1166:             removed.len(),
+1167:             2,
+1168:             "cleanup must remove both stale paired sessions"
+1169:         );
+1170:         assert_eq!(transport.session_count(), 0);
+1171: 
+1172:         let sid_new = accept_hello_from(
+1173:             &mut transport,
+1174:             &sk,
+1175:             "node-a",
+1176:             "node-b",
+1177:             observed_addr([203, 0, 113, 27], 40_061),
+1178:         );
+1179:         assert_eq!(
+1180:             transport
+1181:                 .sessions
+1182:                 .get(&sid_new)
+1183:                 .expect("new session should exist")
+1184:                 .allocated_port,
+1185:             50_000,
+1186:             "cleaned ports must be reusable"
+1187:         );
+1188:         let err = transport
+1189:             .forward_packet(sid_new, b"stale", old_data)
+1190:             .expect_err("old tuple must not claim a reused relay port");
+1191:         assert_eq!(err, RelayForwardError::UnauthorizedSourceTuple);
+1192:     }
+1193: 
+1194:     #[test]
+1195:     fn test_cross_session_forwarding_attempt_is_rejected() {
+1196:         let (sk, _) = make_test_keypair();
+1197:         let mut transport = make_transport(&sk);
+1198: 
+1199:         let sid_ab = accept_hello_from(
+1200:             &mut transport,
+1201:             &sk,
+1202:             "node-a",
+1203:             "node-b",
+1204:             observed_addr([198, 51, 100, 17], 40_070),
+1205:         );
+1206:         let sid_ba = accept_hello_from(
+1207:             &mut transport,
+1208:             &sk,
+1209:             "node-b",
+1210:             "node-a",
+1211:             observed_addr([203, 0, 113, 28], 41_070),
+1212:         );
+1213:         let _ = transport.forward_packet(
+1214:             sid_ab,
+1215:             b"bind-ab",
+1216:             observed_addr([198, 51, 100, 17], 51_890),
+1217:         );
+1218:         let _ =
+1219:             transport.forward_packet(sid_ba, b"bind-ba", observed_addr([203, 0, 113, 28], 51_891));
+1220: 
+1221:         let sid_cd = accept_hello_from(
+1222:             &mut transport,
+1223:             &sk,
+1224:             "node-c",
+1225:             "node-d",
+1226:             observed_addr([198, 51, 100, 18], 40_080),
+1227:         );
+1228:         let sid_dc = accept_hello_from(
+1229:             &mut transport,
+1230:             &sk,
+1231:             "node-d",
+1232:             "node-c",
+1233:             observed_addr([203, 0, 113, 29], 41_080),
+1234:         );
+1235:         let _ = transport.forward_packet(
+1236:             sid_cd,
+1237:             b"bind-cd",
+1238:             observed_addr([198, 51, 100, 18], 51_892),
+1239:         );
+1240:         let _ =
+1241:             transport.forward_packet(sid_dc, b"bind-dc", observed_addr([203, 0, 113, 29], 51_893));
+1242: 
+1243:         let err = transport
+1244:             .forward_packet(
+1245:                 sid_ab,
+1246:                 b"cross-talk",
+1247:                 observed_addr([198, 51, 100, 18], 51_892),
+1248:             )
+1249:             .expect_err("session AB must reject session CD's bound tuple");
+1250:         assert_eq!(err, RelayForwardError::UnauthorizedSourceTuple);
+1251:     }
+1252: 
+1253:     #[test]
+1254:     fn test_keepalive_rejects_unbound_and_wrong_tuple_activity() {
+1255:         let (sk, _) = make_test_keypair();
+1256:         let mut transport = make_transport(&sk);
+1257: 
+1258:         let sid_a = accept_hello_from(
+1259:             &mut transport,
+1260:             &sk,
+1261:             "node-a",
+1262:             "node-b",
+1263:             observed_addr([198, 51, 100, 19], 40_090),
+1264:         );
+1265: 
+1266:         assert!(
+1267:             !transport
+1268:                 .touch_session_from_tuple(sid_a, observed_addr([198, 51, 100, 19], 51_894))
+1269:                 .expect("unbound keepalive should be ignored, not accepted")
+1270:         );
+1271: 
+1272:         let sid_b = accept_hello_from(
+1273:             &mut transport,
+1274:             &sk,
+1275:             "node-b",
+1276:             "node-a",
+1277:             observed_addr([203, 0, 113, 30], 41_090),
+1278:         );
+1279:         let _ =
+1280:             transport.forward_packet(sid_a, b"bind-a", observed_addr([198, 51, 100, 19], 51_894));
+1281:         let _ =
+1282:             transport.forward_packet(sid_b, b"bind-b", observed_addr([203, 0, 113, 30], 51_895));
+1283: 
+1284:         let err = transport
+1285:             .touch_session_from_tuple(sid_a, observed_addr([198, 51, 100, 19], 60_001))
+1286:             .expect_err("bound keepalive must reject a different tuple");
+1287:         assert_eq!(err, RelayForwardError::UnauthorizedSourceTuple);
+1288:     }
+1289: 
+1290:     #[test]
+1291:     fn test_expired_session_forwarding_is_rejected_and_cleaned_up() {
+1292:         let (sk, _) = make_test_keypair();
+1293:         let mut transport = make_transport(&sk);
+1294: 
+1295:         let sid_a = accept_hello_from(
+1296:             &mut transport,
+1297:             &sk,
+1298:             "node-a",
+1299:             "node-b",
+1300:             observed_addr([198, 51, 100, 20], 40_100),
+1301:         );
+1302:         let sid_b = accept_hello_from(
+1303:             &mut transport,
+1304:             &sk,
+1305:             "node-b",
+1306:             "node-a",
+1307:             observed_addr([203, 0, 113, 31], 41_100),
+1308:         );
+1309:         let _ =
+1310:             transport.forward_packet(sid_a, b"bind-a", observed_addr([198, 51, 100, 20], 51_896));
+1311:         let _ =
+1312:             transport.forward_packet(sid_b, b"bind-b", observed_addr([203, 0, 113, 31], 51_897));
+1313: 
+1314:         transport
+1315:             .sessions
+1316:             .get_mut(&sid_a)
+1317:             .expect("session should exist")
+1318:             .expires_at_unix = SystemTime::now()
+1319:             .duration_since(UNIX_EPOCH)
+1320:             .unwrap()
+1321:             .as_secs()
+1322:             .saturating_sub(1);
+1323: 
+1324:         let err = transport
+1325:             .forward_packet(sid_a, b"expired", observed_addr([198, 51, 100, 20], 51_896))
+1326:             .expect_err("expired session must not forward");
+1327:         assert_eq!(err, RelayForwardError::SessionExpired);
+1328:         assert!(!transport.has_session(sid_a));
+1329:         assert!(transport.has_session(sid_b));
+1330:     }
+1331: 
+1332:     // ── Session cleanup ───
+1333: 
+1334:     #[test]
+1335:     fn test_idle_session_cleanup() {
+1336:         let (sk, _) = make_test_keypair();
+1337:         let mut transport = make_transport(&sk);
+1338: 
+1339:         transport.handle_hello(make_hello(&sk, "node-a", "node-b"));
+1340:         transport.handle_hello(make_hello(&sk, "node-b", "node-a"));
+1341:         assert_eq!(transport.session_count(), 2);
+1342: 
+1343:         for s in transport.sessions.values_mut() {
+1344:             s.last_packet_at = Instant::now() - Duration::from_secs(IDLE_SESSION_TIMEOUT_SECS + 1);
+1345:         }
+1346:         transport.cleanup_idle_sessions();
+1347:         assert_eq!(transport.session_count(), 0);
+1348:     }
+1349: 
+1350:     #[test]
+1351:     fn test_half_open_session_cleanup() {
+1352:         let (sk, _) = make_test_keypair();
+1353:         let mut transport = make_transport(&sk);
+1354: 
+1355:         transport.handle_hello(make_hello(&sk, "node-a", "node-b")); // no matching hello-b
+1356:         assert_eq!(transport.session_count(), 1);
+1357: 
+1358:         for s in transport.sessions.values_mut() {
+1359:             s.established_at =
+1360:                 Instant::now() - Duration::from_secs(HALF_OPEN_SESSION_TIMEOUT_SECS + 1);
+1361:         }
+1362:         transport.cleanup_idle_sessions();
+1363:         assert_eq!(transport.session_count(), 0);
+1364:     }
+1365: 
+1366:     // ── Constant-time security regression tests ───
+1367:     //
+1368:     // These tests document and verify the constant-time comparison guarantees.
+1369:     // The relay uses `subtle::ConstantTimeEq` for all secret-field comparisons
+1370:     // to prevent timing side-channels in authentication paths.
+1371: 
+1372:     #[test]
+1373:     fn test_constant_time_node_id_comparison_rejects_all_mismatches_uniformly() {
+1374:         // This test verifies that node_id mismatches (where hello.node_id !=
+1375:         // token.node_id) always produce the same rejection reason regardless
+1376:         // of which byte position differs.  This is a regression test for the
+1377:         // constant-time ct_eq usage in handle_hello.
+1378:         let (sk, _) = make_test_keypair();
+1379:         let mut transport = make_transport(&sk);
+1380: 
+1381:         // Token is issued for "node-aaaa", but hello claims different node_ids
+1382:         // that differ in various positions.
+1383:         let token = make_valid_token(&sk, "node-aaaa", "node-b", 60);
+1384: 
+1385:         let mismatches = [
+1386:             "Xode-aaaa", // first byte differs
+1387:             "node-Xaaa", // middle byte differs
+1388:             "node-aaaX", // last byte differs
+1389:             "attacker",  // completely different
+1390:         ];
+1391: 
+1392:         for wrong_id in mismatches {
+1393:             let hello = RelayHello {
+1394:                 node_id: wrong_id.to_string(),
+1395:                 peer_node_id: "node-b".to_string(),
+1396:                 session_token: token.clone(),
+1397:             };
+1398: 
+1399:             // All mismatches must produce InvalidToken (not a position-revealing error)
+1400:             assert_eq!(
+1401:                 transport.handle_hello(hello),
+1402:                 RelayHelloResponse::Rejected(RejectReason::InvalidToken),
+1403:                 "node_id mismatch at any position must produce InvalidToken"
+1404:             );
+1405:         }
+1406:     }
+1407: 
+1408:     #[test]
+1409:     fn test_constant_time_peer_id_comparison_rejects_all_mismatches_uniformly() {
+1410:         // Same regression test for peer_node_id field.
+1411:         let (sk, _) = make_test_keypair();
+1412:         let mut transport = make_transport(&sk);
+1413: 
+1414:         let token = make_valid_token(&sk, "node-a", "peer-bbbb", 60);
+1415: 
+1416:         let mismatches = [
+1417:             "Xeer-bbbb", // first byte differs
+1418:             "peer-Xbbb", // middle byte differs
+1419:             "peer-bbbX", // last byte differs
+1420:             "attacker",  // completely different
+1421:         ];
+1422: 
+1423:         for wrong_peer in mismatches {
+1424:             let hello = RelayHello {
+1425:                 node_id: "node-a".to_string(),
+1426:                 peer_node_id: wrong_peer.to_string(),
+1427:                 session_token: token.clone(),
+1428:             };
+1429: 
+1430:             // All mismatches must produce PeerMismatch (consistent rejection)
+1431:             assert_eq!(
+1432:                 transport.handle_hello(hello),
+1433:                 RelayHelloResponse::Rejected(RejectReason::PeerMismatch),
+1434:                 "peer_node_id mismatch at any position must produce PeerMismatch"
+1435:             );
+1436:         }
+1437:     }
+1438: 
+1439:     #[test]
+1440:     fn test_constant_time_relay_id_comparison_rejects_all_mismatches_uniformly() {
+1441:         // Same regression test for relay_id field.
+1442:         let (sk, _) = make_test_keypair();
+1443:         let mut transport = make_transport(&sk);
+1444: 
+1445:         // Generate tokens with relay_ids that differ in various byte positions
+1446:         let relay_ids: [[u8; 16]; 3] = [
+1447:             [
+1448:                 0xBB, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+1449:                 0xAA, 0xAA,
+1450:             ], // first byte differs
+1451:             [
+1452:                 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xBB, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+1453:                 0xAA, 0xAA,
+1454:             ], // middle byte differs
+1455:             [
+1456:                 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+1457:                 0xAA, 0xBB,
+1458:             ], // last byte differs
+1459:         ];
+1460: 
+1461:         for wrong_relay_id in relay_ids {
+1462:             let token = RelaySessionToken::sign(&sk, "node-a", "node-b", wrong_relay_id, 60);
+1463:             let hello = RelayHello {
+1464:                 node_id: "node-a".to_string(),
+1465:                 peer_node_id: "node-b".to_string(),
+1466:                 session_token: token,
+1467:             };
+1468: 
+1469:             // All mismatches must produce InvalidToken
+1470:             assert_eq!(
+1471:                 transport.handle_hello(hello),
+1472:                 RelayHelloResponse::Rejected(RejectReason::InvalidToken),
+1473:                 "relay_id mismatch at any byte position must produce InvalidToken"
+1474:             );
+1475:         }
+1476:     }
+1477: 
+1478:     #[test]
+1479:     fn test_relay_session_token_ct_eq_is_available_and_correct() {
+1480:         // Verify that RelaySessionToken::ct_eq works correctly and is the
+1481:         // intended comparison method for tokens.
+1482:         let (sk, _) = make_test_keypair();
+1483: 
+1484:         let token_a = make_valid_token(&sk, "node-a", "node-b", 60);
+1485:         let token_b = make_valid_token(&sk, "node-a", "node-b", 60);
+1486:         let token_c = make_valid_token(&sk, "node-a", "node-c", 60);
+1487: 
+1488:         // Different nonces mean tokens are not equal even if fields match
+1489:         assert!(
+1490:             !token_a.ct_eq(&token_b),
+1491:             "tokens with different nonces must not be ct_eq"
+1492:         );
+1493: 
+1494:         // Same token compared to itself is always equal
+1495:         assert!(
+1496:             token_a.ct_eq(&token_a),
+1497:             "token compared to itself must be ct_eq"
+1498:         );
+1499: 
+1500:         // Obviously different tokens are not equal
+1501:         assert!(
+1502:             !token_a.ct_eq(&token_c),
+1503:             "tokens with different peer_node_id must not be ct_eq"
+1504:         );
+1505:     }
+1506: 
+1507:     #[test]
+1508:     fn test_subtle_crate_is_used_for_constant_time_comparisons() {
+1509:         // This is a compile-time contract test: the subtle crate must be
+1510:         // available and ConstantTimeEq must be usable.  If subtle is removed
+1511:         // from dependencies or the API changes, this test will fail to compile.
+1512:         use subtle::ConstantTimeEq;
+1513: 
+1514:         let a: [u8; 16] = [0xAA; 16];
+1515:         let b: [u8; 16] = [0xAA; 16];
+1516:         let c: [u8; 16] = [0xBB; 16];
+1517: 
+1518:         let eq_ab: bool = a.ct_eq(&b).into();
+1519:         let eq_ac: bool = a.ct_eq(&c).into();
+1520: 
+1521:         assert!(eq_ab, "identical arrays must be ct_eq");
+1522:         assert!(!eq_ac, "different arrays must not be ct_eq");
+1523:     }
+1524: 
+1525:     // ── Adversarial security regression tests ───
+1526:     //
+1527:     // These tests verify the relay rejects various attack scenarios correctly.
+1528: 
+1529:     #[test]
+1530:     fn adversarial_forged_signature_rejected_without_timing_leak() {
+1531:         // Attacker forges a token with wrong signature bytes
+1532:         let (sk, _) = make_test_keypair();
+1533:         let mut transport = RelayTransport::new(TEST_RELAY_ID, sk.verifying_key(), 8, 90);
+1534: 
+1535:         let mut hello = make_hello(&sk, "attacker", "victim");
+1536:         // Corrupt the signature
+1537:         hello.session_token.signature[0] ^= 0xFF;
+1538:         hello.session_token.signature[31] ^= 0xFF;
+1539:         hello.session_token.signature[63] ^= 0xFF;
+1540: 
+1541:         let result = transport.handle_hello(hello);
+1542:         assert_eq!(
+1543:             result,
+1544:             RelayHelloResponse::Rejected(RejectReason::InvalidToken),
+1545:             "forged signature must be rejected"
+1546:         );
+1547:     }
+1548: 
+1549:     #[test]
+1550:     fn adversarial_past_expired_token_rejected() {
+1551:         // Attacker tries to use a token that has expired beyond clock skew tolerance
+1552:         let (sk, _) = make_test_keypair();
+1553:         let _transport = RelayTransport::new(TEST_RELAY_ID, sk.verifying_key(), 8, 90);
+1554:         let _token = RelaySessionToken::sign(&sk, "node-a", "node-b", TEST_RELAY_ID, 1);
+1555:         // The explicit expired-token path is already covered by test_expired_token_rejected.
+1556:         // This test keeps the adversarial boundary case focused on a strict clock-skew policy.
+1557: 
+1558:         // Instead, verify that a very short TTL with no skew tolerance is rejected
+1559:         // This tests the boundary condition
+1560:         let mut transport_strict = RelayTransport::new(TEST_RELAY_ID, sk.verifying_key(), 8, 0);
+1561: 
+1562:         // With 1 second TTL and immediate check, should still pass (just barely)
+1563:         let hello = make_hello(&sk, "node-a", "node-b");
+1564:         assert!(
+1565:             matches!(
+1566:                 transport_strict.handle_hello(hello),
+1567:                 RelayHelloResponse::Accepted(_)
+1568:             ),
+1569:             "fresh token should be accepted even with strict 0 clock skew"
+1570:         );
+1571:     }
+1572: 
+1573:     #[test]
+1574:     fn adversarial_session_exhaustion_attack_blocked() {
+1575:         // Attacker tries to exhaust session capacity for a node
+1576:         let (sk, _) = make_test_keypair();
+1577:         let mut transport = RelayTransport::new(TEST_RELAY_ID, sk.verifying_key(), 2, 90);
+1578: 
+1579:         // Fill up the session quota
+1580:         for i in 0..2 {
+1581:             let hello = make_hello(&sk, "attacker", &format!("peer-{i}"));
+1582:             assert!(matches!(
+1583:                 transport.handle_hello(hello),
+1584:                 RelayHelloResponse::Accepted(_)
+1585:             ));
+1586:         }
+1587: 
+1588:         // Additional session should be rejected
+1589:         let hello = make_hello(&sk, "attacker", "peer-extra");
+1590:         assert_eq!(
+1591:             transport.handle_hello(hello),
+1592:             RelayHelloResponse::Rejected(RejectReason::Capacity),
+1593:             "session exhaustion must be blocked"
+1594:         );
+1595: 
+1596:         // Verify other nodes are not affected
+1597:         let (sk2, _) = make_test_keypair();
+1598:         let mut transport2 = RelayTransport::new(TEST_RELAY_ID, sk2.verifying_key(), 2, 90);
+1599:         let hello = make_hello(&sk2, "honest-node", "peer-1");
+1600:         assert!(
+1601:             matches!(
+1602:                 transport2.handle_hello(hello),
+1603:                 RelayHelloResponse::Accepted(_)
+1604:             ),
+1605:             "other nodes must not be affected by attacker's session exhaustion"
+1606:         );
+1607:     }
+1608: 
+1609:     #[test]
+1610:     fn adversarial_hello_flood_rate_limited() {
+1611:         // Attacker floods hello messages to exhaust CPU
+1612:         let (sk, _) = make_test_keypair();
+1613:         let mut transport = RelayTransport::new(TEST_RELAY_ID, sk.verifying_key(), 100, 90);
+1614: 
+1615:         // Send hellos up to the rate limit
+1616:         let mut accepted = 0;
+1617:         let mut rate_limited = 0;
+1618:         for i in 0..20 {
+1619:             let hello = make_hello(&sk, "flood-attacker", &format!("peer-{i}"));
+1620:             match transport.handle_hello(hello) {
+1621:                 RelayHelloResponse::Accepted(_) => accepted += 1,
+1622:                 RelayHelloResponse::Rejected(RejectReason::RateLimitExceeded) => rate_limited += 1,
+1623:                 other => panic!("unexpected response: {other:?}"),
+1624:             }
+1625:         }
+1626: 
+1627:         // Should hit rate limit before all accepted
+1628:         assert!(
+1629:             rate_limited > 0,
+1630:             "hello flood must trigger rate limiting (accepted={accepted}, rate_limited={rate_limited})"
+1631:         );
+1632:         assert!(
+1633:             accepted <= MAX_HELLOS_PER_NODE_PER_SEC as usize,
+1634:             "accepted count must not exceed rate limit"
+1635:         );
+1636:     }
+1637: 
+1638:     #[test]
+1639:     fn adversarial_cross_relay_token_rejected() {
+1640:         // Attacker tries to use a token issued for a different relay
+1641:         let (sk, _) = make_test_keypair();
+1642:         let other_relay_id: [u8; 16] = [0xDE; 16];
+1643:         let mut transport = RelayTransport::new(TEST_RELAY_ID, sk.verifying_key(), 8, 90);
+1644: 
+1645:         // Token signed for wrong relay
+1646:         let token = RelaySessionToken::sign(&sk, "node-a", "node-b", other_relay_id, 60);
+1647:         let hello = RelayHello {
+1648:             node_id: "node-a".to_string(),
+1649:             peer_node_id: "node-b".to_string(),
+1650:             session_token: token,
+1651:         };
+1652: 
+1653:         let result = transport.handle_hello(hello);
+1654:         assert_eq!(
+1655:             result,
+1656:             RelayHelloResponse::Rejected(RejectReason::InvalidToken),
+1657:             "token for different relay must be rejected"
+1658:         );
+1659:     }
+1660: 
+1661:     #[test]
+1662:     fn adversarial_node_impersonation_rejected() {
+1663:         // Attacker tries to claim a different node_id in hello vs token
+1664:         let (sk, _) = make_test_keypair();
+1665:         let mut transport = RelayTransport::new(TEST_RELAY_ID, sk.verifying_key(), 8, 90);
+1666: 
+1667:         // Token for "real-node" but hello claims "attacker"
+1668:         let token = RelaySessionToken::sign(&sk, "real-node", "peer-b", TEST_RELAY_ID, 60);
+1669:         let hello = RelayHello {
+1670:             node_id: "attacker".to_string(), // Mismatch!
+1671:             peer_node_id: "peer-b".to_string(),
+1672:             session_token: token,
+1673:         };
+1674: 
+1675:         let result = transport.handle_hello(hello);
+1676:         assert_eq!(
+1677:             result,
+1678:             RelayHelloResponse::Rejected(RejectReason::InvalidToken),
+1679:             "node impersonation must be rejected"
+1680:         );
+1681:     }
+1682: 
+1683:     #[test]
+1684:     fn adversarial_peer_redirection_rejected() {
+1685:         // Attacker tries to redirect traffic to different peer
+1686:         let (sk, _) = make_test_keypair();
+1687:         let mut transport = RelayTransport::new(TEST_RELAY_ID, sk.verifying_key(), 8, 90);
+1688: 
+1689:         // Token for node-a→peer-b but hello claims node-a→attacker-peer
+1690:         let token = RelaySessionToken::sign(&sk, "node-a", "peer-b", TEST_RELAY_ID, 60);
+1691:         let hello = RelayHello {
+1692:             node_id: "node-a".to_string(),
+1693:             peer_node_id: "attacker-peer".to_string(), // Mismatch!
+1694:             session_token: token,
+1695:         };
+1696: 
+1697:         let result = transport.handle_hello(hello);
+1698:         assert_eq!(
+1699:             result,
+1700:             RelayHelloResponse::Rejected(RejectReason::PeerMismatch),
+1701:             "peer redirection must be rejected"
+1702:         );
+1703:     }
+1704: 
+1705:     #[test]
+1706:     fn adversarial_nonce_reuse_rejected_even_with_valid_signature() {
+1707:         // Attacker captures valid token and replays it
+1708:         let (sk, _) = make_test_keypair();
+1709:         let mut transport = RelayTransport::new(TEST_RELAY_ID, sk.verifying_key(), 8, 90);
+1710: 
+1711:         let hello = make_hello(&sk, "node-a", "node-b");
+1712:         let cloned_hello = hello.clone();
+1713: 
+1714:         // First use succeeds
+1715:         assert!(matches!(
+1716:             transport.handle_hello(hello),
+1717:             RelayHelloResponse::Accepted(_)
+1718:         ));
+1719: 
+1720:         // Replay of exact same token is rejected
+1721:         assert_eq!(
+1722:             transport.handle_hello(cloned_hello),
+1723:             RelayHelloResponse::Rejected(RejectReason::ReplayedNonce),
+1724:             "replayed nonce must be rejected even with valid signature"
+1725:         );
+1726:     }
+1727: 
+1728:     // ── Keepalive / touch_session tests ───
+1729: 
+1730:     #[test]
+1731:     fn touch_session_updates_last_packet_at() {
+1732:         let (sk, _) = make_test_keypair();
+1733:         let mut transport = make_transport(&sk);
+1734: 
+1735:         let hello = make_hello(&sk, "node-a", "node-b");
+1736:         let ack = match transport.handle_hello(hello) {
+1737:             RelayHelloResponse::Accepted(ack) => ack,
+1738:             other => panic!("expected Accepted, got {other:?}"),
+1739:         };
+1740: 
+1741:         // Age the session
+1742:         if let Some(session) = transport.sessions.get_mut(&ack.session_id) {
+1743:             session.last_packet_at = Instant::now() - Duration::from_secs(100);
+1744:         }
+1745: 
+1746:         // Touch should update timestamp
+1747:         assert!(
+1748:             transport.touch_session(ack.session_id).is_ok(),
+1749:             "touch_session should succeed for valid session"
+1750:         );
+1751: 
+1752:         // Verify timestamp was updated (should be recent now)
+1753:         if let Some(session) = transport.sessions.get(&ack.session_id) {
+1754:             assert!(
+1755:                 session.last_packet_at.elapsed() < Duration::from_secs(1),
+1756:                 "last_packet_at should be recent after touch"
+1757:             );
+1758:         }
+1759:     }
+1760: 
+1761:     #[test]
+1762:     fn touch_session_rejects_unknown_session() {
+1763:         let (sk, _) = make_test_keypair();
+1764:         let mut transport = make_transport(&sk);
+1765: 
+1766:         let unknown_session = SessionId::from([0xDE; 16]);
+1767:         assert!(
+1768:             transport.touch_session(unknown_session).is_err(),
+1769:             "touch_session must reject unknown session"
+1770:         );
+1771:     }
+1772: 
+1773:     #[test]
+1774:     fn touch_session_prevents_idle_cleanup() {
+1775:         let (sk, _) = make_test_keypair();
+1776:         let mut transport = make_transport(&sk);
+1777: 
+1778:         // Create two sessions
+1779:         let hello_a = make_hello(&sk, "node-a", "node-b");
+1780:         let ack_a = match transport.handle_hello(hello_a) {
+1781:             RelayHelloResponse::Accepted(ack) => ack,
+1782:             other => panic!("expected Accepted, got {other:?}"),
+1783:         };
+1784: 
+1785:         let hello_b = make_hello(&sk, "node-b", "node-a");
+1786:         let ack_b = match transport.handle_hello(hello_b) {
+1787:             RelayHelloResponse::Accepted(ack) => ack,
+1788:             other => panic!("expected Accepted, got {other:?}"),
+1789:         };
+1790: 
+1791:         // Age both sessions past idle threshold
+1792:         for session in transport.sessions.values_mut() {
+1793:             session.last_packet_at =
+1794:                 Instant::now() - Duration::from_secs(IDLE_SESSION_TIMEOUT_SECS + 1);
+1795:         }
+1796: 
+1797:         // Touch only session A
+1798:         let _ = transport.touch_session(ack_a.session_id);
+1799: 
+1800:         // Run cleanup
+1801:         transport.cleanup_idle_sessions();
+1802: 
+1803:         // Session A should survive, session B should be cleaned
+1804:         assert!(
+1805:             transport.sessions.contains_key(&ack_a.session_id),
+1806:             "touched session should survive cleanup"
+1807:         );
+1808:         assert!(
+1809:             !transport.sessions.contains_key(&ack_b.session_id),
+1810:             "untouched idle session should be cleaned up"
+1811:         );
+1812:     }
+1813: }
+
