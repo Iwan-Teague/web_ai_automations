@@ -1,0 +1,828 @@
+# Rust Project Map — rustynet-windows-native
+
+Root: /Users/iwan/Desktop/Rustynet
+Captured: 2026-05-06T15:06:09+01:00
+Git: branch `main` @ 8a9c3eab12fe  ·  uncommitted files: 0
+Files: 2  ·  Lines of source: 776
+
+## Crate Dependencies (within this workspace)
+
+Depends on (workspace): (none)
+Depended on by (workspace): rustynet-backend-wireguard, rustynet-crypto, rustynetd
+
+## Public API Surface
+
+16 public items across 1 file(s).
+
+/crates/rustynet-windows-native/src/lib.rs
+  L    7  pub enum WindowsDpapiScope
+  L   25  pub enum AuthenticodeChainOutcome
+  L   31  pub fn dpapi_protect(
+  L   40  pub fn dpapi_unprotect(_blob: &[u8]) -> Result<Vec<u8>, String>
+  L   45  pub fn inspect_file_sddl(_path: &Path) -> Result<String, String>
+  L   50  pub fn verify_authenticode_chain(_path: &Path) -> Result<AuthenticodeChainOutcome, String>
+  L   65  pub fn lookup_account_sid_string(_account_name: &str) -> Result<String, String>
+  L   70  pub fn serve_named_pipe_one_message<F>(
+  L   83  pub fn call_named_pipe(
+  L  126  pub fn dpapi_protect(
+  L  163  pub fn dpapi_unprotect(blob: &[u8]) -> Result<Vec<u8>, String>
+  L  189  pub fn inspect_file_sddl(path: &Path) -> Result<String, String>
+  L  225  pub fn lookup_account_sid_string(account_name: &str) -> Result<String, String>
+  L  274  pub fn serve_named_pipe_one_message<F>(
+  L  335  pub fn call_named_pipe(
+  L  645  pub fn verify_authenticode_chain(
+
+
+## Document Tree
+
+`-- crates
+    `-- rustynet-windows-native
+        |-- Cargo.toml  (18 lines)
+        `-- src
+            `-- lib.rs  (758 lines)  — [cfg(not(windows))]
+
+
+## Files
+
+===== /crates/rustynet-windows-native/src/lib.rs =====
+
+   1: #[cfg(not(windows))]
+   2: use std::path::Path;
+   3: #[cfg(not(windows))]
+   4: use std::time::Duration;
+   5: 
+   6: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+   7: pub enum WindowsDpapiScope {
+   8:     CurrentUser,
+   9:     LocalMachine,
+  10: }
+  11: 
+  12: /// Outcome of a `verify_authenticode_chain` call. Variants:
+  13: /// - `Verified`: WinVerifyTrust returned `S_OK` for the
+  14: ///   `WINTRUST_ACTION_GENERIC_VERIFY_V2` policy with chain
+  15: ///   revocation enabled. The signing certificate's full chain is
+  16: ///   trusted, the file digest matches the SpcIndirectData, and any
+  17: ///   counter-signature timestamps are valid.
+  18: /// - `Untrusted`: WinVerifyTrust returned a non-zero HRESULT. The
+  19: ///   `reason` carries the canonical error label (e.g.
+  20: ///   `TRUST_E_NOSIGNATURE`, `CERT_E_UNTRUSTEDROOT`,
+  21: ///   `CERT_E_REVOKED`, `TRUST_E_BAD_DIGEST`) and `hresult` carries
+  22: ///   the raw 32-bit code (sign-extended into i64 so callers can
+  23: ///   round-trip through serde without precision loss).
+  24: #[derive(Debug, Clone, PartialEq, Eq)]
+  25: pub enum AuthenticodeChainOutcome {
+  26:     Verified,
+  27:     Untrusted { reason: String, hresult: i64 },
+  28: }
+  29: 
+  30: #[cfg(not(windows))]
+  31: pub fn dpapi_protect(
+  32:     _plaintext: &[u8],
+  33:     _scope: WindowsDpapiScope,
+  34:     _description: &str,
+  35: ) -> Result<Vec<u8>, String> {
+  36:     Err("Windows DPAPI is only available on Windows hosts".to_string())
+  37: }
+  38: 
+  39: #[cfg(not(windows))]
+  40: pub fn dpapi_unprotect(_blob: &[u8]) -> Result<Vec<u8>, String> {
+  41:     Err("Windows DPAPI is only available on Windows hosts".to_string())
+  42: }
+  43: 
+  44: #[cfg(not(windows))]
+  45: pub fn inspect_file_sddl(_path: &Path) -> Result<String, String> {
+  46:     Err("Windows ACL inspection is only available on Windows hosts".to_string())
+  47: }
+  48: 
+  49: #[cfg(not(windows))]
+  50: pub fn verify_authenticode_chain(_path: &Path) -> Result<AuthenticodeChainOutcome, String> {
+  51:     // Off-Windows: WinVerifyTrust is unavailable. The verifier
+  52:     // contract is "fail closed when the trust state cannot be
+  53:     // observed", so callers MUST treat this Err as a drift outcome
+  54:     // (not as a trust grant). The pure PE-parser surface in
+  55:     // `crates/rustynetd/src/windows_authenticode.rs` continues to
+  56:     // report signature *presence* off-Windows for diagnostic
+  57:     // purposes; the chain check stays Windows-only.
+  58:     Err(
+  59:         "WinVerifyTrust authenticode chain validation is only available on Windows hosts"
+  60:             .to_string(),
+  61:     )
+  62: }
+  63: 
+  64: #[cfg(not(windows))]
+  65: pub fn lookup_account_sid_string(_account_name: &str) -> Result<String, String> {
+  66:     Err("Windows SID lookup is only available on Windows hosts".to_string())
+  67: }
+  68: 
+  69: #[cfg(not(windows))]
+  70: pub fn serve_named_pipe_one_message<F>(
+  71:     _path: &str,
+  72:     _security_sddl: &str,
+  73:     _max_message_bytes: usize,
+  74:     _handler: F,
+  75: ) -> Result<(), String>
+  76: where
+  77:     F: FnOnce(Vec<u8>) -> Result<Vec<u8>, String>,
+  78: {
+  79:     Err("Windows named pipes are only available on Windows hosts".to_string())
+  80: }
+  81: 
+  82: #[cfg(not(windows))]
+  83: pub fn call_named_pipe(
+  84:     _path: &str,
+  85:     _request: &[u8],
+  86:     _max_response_bytes: usize,
+  87:     _timeout: Duration,
+  88: ) -> Result<Vec<u8>, String> {
+  89:     Err("Windows named pipes are only available on Windows hosts".to_string())
+  90: }
+  91: 
+  92: #[cfg(windows)]
+  93: mod imp {
+  94:     use super::WindowsDpapiScope;
+  95:     use std::ffi::c_void;
+  96:     use std::mem::size_of;
+  97:     use std::path::Path;
+  98:     use std::ptr::{null, null_mut};
+  99:     use std::time::Duration;
+ 100:     use windows_sys::Win32::Foundation::{
+ 101:         CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, ERROR_PIPE_CONNECTED,
+ 102:         GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+ 103:     };
+ 104:     use windows_sys::Win32::Security::Authorization::{
+ 105:         ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
+ 106:         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+ 107:     };
+ 108:     use windows_sys::Win32::Security::Cryptography::{
+ 109:         CRYPT_INTEGER_BLOB, CRYPTPROTECT_LOCAL_MACHINE, CRYPTPROTECT_UI_FORBIDDEN,
+ 110:         CryptProtectData, CryptUnprotectData,
+ 111:     };
+ 112:     use windows_sys::Win32::Security::{
+ 113:         DACL_SECURITY_INFORMATION, GetFileSecurityW, GetKernelObjectSecurity, LookupAccountNameW,
+ 114:         OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+ 115:     };
+ 116:     use windows_sys::Win32::Storage::FileSystem::{
+ 117:         FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAGS_AND_ATTRIBUTES, FlushFileBuffers,
+ 118:         PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
+ 119:     };
+ 120:     use windows_sys::Win32::System::Pipes::{
+ 121:         CallNamedPipeW, ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
+ 122:         PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE,
+ 123:         PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+ 124:     };
+ 125: 
+ 126:     pub fn dpapi_protect(
+ 127:         plaintext: &[u8],
+ 128:         scope: WindowsDpapiScope,
+ 129:         description: &str,
+ 130:     ) -> Result<Vec<u8>, String> {
+ 131:         if plaintext.is_empty() {
+ 132:             return Err("DPAPI plaintext must not be empty".to_string());
+ 133:         }
+ 134:         let description_wide = to_wide(description);
+ 135:         let input = blob_from_slice(plaintext)?;
+ 136:         let mut output = empty_blob();
+ 137:         let flags = match scope {
+ 138:             WindowsDpapiScope::CurrentUser => CRYPTPROTECT_UI_FORBIDDEN,
+ 139:             WindowsDpapiScope::LocalMachine => {
+ 140:                 CRYPTPROTECT_UI_FORBIDDEN | CRYPTPROTECT_LOCAL_MACHINE
+ 141:             }
+ 142:         };
+ 143:         let ok = unsafe {
+ 144:             CryptProtectData(
+ 145:                 &input,
+ 146:                 description_wide.as_ptr(),
+ 147:                 null(),
+ 148:                 null(),
+ 149:                 null(),
+ 150:                 flags,
+ 151:                 &mut output,
+ 152:             )
+ 153:         };
+ 154:         if ok == 0 {
+ 155:             return Err(format!(
+ 156:                 "CryptProtectData failed with Windows error {}",
+ 157:                 unsafe { GetLastError() }
+ 158:             ));
+ 159:         }
+ 160:         blob_to_vec(&mut output)
+ 161:     }
+ 162: 
+ 163:     pub fn dpapi_unprotect(blob: &[u8]) -> Result<Vec<u8>, String> {
+ 164:         if blob.is_empty() {
+ 165:             return Err("DPAPI blob must not be empty".to_string());
+ 166:         }
+ 167:         let input = blob_from_slice(blob)?;
+ 168:         let mut output = empty_blob();
+ 169:         let ok = unsafe {
+ 170:             CryptUnprotectData(
+ 171:                 &input,
+ 172:                 null_mut(),
+ 173:                 null(),
+ 174:                 null(),
+ 175:                 null(),
+ 176:                 CRYPTPROTECT_UI_FORBIDDEN,
+ 177:                 &mut output,
+ 178:             )
+ 179:         };
+ 180:         if ok == 0 {
+ 181:             return Err(format!(
+ 182:                 "CryptUnprotectData failed with Windows error {}",
+ 183:                 unsafe { GetLastError() }
+ 184:             ));
+ 185:         }
+ 186:         blob_to_vec(&mut output)
+ 187:     }
+ 188: 
+ 189:     pub fn inspect_file_sddl(path: &Path) -> Result<String, String> {
+ 190:         let wide_path = to_wide_os(path.as_os_str());
+ 191:         let mut needed = 0u32;
+ 192:         let requested = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+ 193:         let first =
+ 194:             unsafe { GetFileSecurityW(wide_path.as_ptr(), requested, null_mut(), 0, &mut needed) };
+ 195:         if first != 0 {
+ 196:             return Err(
+ 197:                 "GetFileSecurityW unexpectedly succeeded with a zero-length buffer".to_string(),
+ 198:             );
+ 199:         }
+ 200:         let err = unsafe { GetLastError() };
+ 201:         if err != ERROR_INSUFFICIENT_BUFFER || needed == 0 {
+ 202:             return Err(format!(
+ 203:                 "GetFileSecurityW sizing failed with Windows error {err}"
+ 204:             ));
+ 205:         }
+ 206:         let mut buffer = vec![0u8; needed as usize];
+ 207:         let ok = unsafe {
+ 208:             GetFileSecurityW(
+ 209:                 wide_path.as_ptr(),
+ 210:                 requested,
+ 211:                 buffer.as_mut_ptr().cast::<c_void>(),
+ 212:                 needed,
+ 213:                 &mut needed,
+ 214:             )
+ 215:         };
+ 216:         if ok == 0 {
+ 217:             return Err(format!(
+ 218:                 "GetFileSecurityW failed with Windows error {}",
+ 219:                 unsafe { GetLastError() }
+ 220:             ));
+ 221:         }
+ 222:         security_descriptor_to_sddl(buffer.as_mut_ptr().cast::<c_void>())
+ 223:     }
+ 224: 
+ 225:     pub fn lookup_account_sid_string(account_name: &str) -> Result<String, String> {
+ 226:         let account_wide = to_wide(account_name);
+ 227:         let mut sid_len = 0u32;
+ 228:         let mut domain_len = 0u32;
+ 229:         let mut use_type = 0i32;
+ 230:         let first = unsafe {
+ 231:             LookupAccountNameW(
+ 232:                 null(),
+ 233:                 account_wide.as_ptr(),
+ 234:                 null_mut(),
+ 235:                 &mut sid_len,
+ 236:                 null_mut(),
+ 237:                 &mut domain_len,
+ 238:                 &mut use_type,
+ 239:             )
+ 240:         };
+ 241:         if first != 0 {
+ 242:             return Err(
+ 243:                 "LookupAccountNameW unexpectedly succeeded without a SID buffer".to_string(),
+ 244:             );
+ 245:         }
+ 246:         let err = unsafe { GetLastError() };
+ 247:         if err != ERROR_INSUFFICIENT_BUFFER || sid_len == 0 {
+ 248:             return Err(format!(
+ 249:                 "LookupAccountNameW sizing failed for '{account_name}' with Windows error {err}"
+ 250:             ));
+ 251:         }
+ 252:         let mut sid = vec![0u8; sid_len as usize];
+ 253:         let mut domain = vec![0u16; domain_len as usize];
+ 254:         let ok = unsafe {
+ 255:             LookupAccountNameW(
+ 256:                 null(),
+ 257:                 account_wide.as_ptr(),
+ 258:                 sid.as_mut_ptr().cast::<c_void>(),
+ 259:                 &mut sid_len,
+ 260:                 domain.as_mut_ptr(),
+ 261:                 &mut domain_len,
+ 262:                 &mut use_type,
+ 263:             )
+ 264:         };
+ 265:         if ok == 0 {
+ 266:             return Err(format!(
+ 267:                 "LookupAccountNameW failed for '{account_name}' with Windows error {}",
+ 268:                 unsafe { GetLastError() }
+ 269:             ));
+ 270:         }
+ 271:         sid_to_string(sid.as_mut_ptr().cast::<c_void>())
+ 272:     }
+ 273: 
+ 274:     pub fn serve_named_pipe_one_message<F>(
+ 275:         path: &str,
+ 276:         security_sddl: &str,
+ 277:         max_message_bytes: usize,
+ 278:         handler: F,
+ 279:     ) -> Result<(), String>
+ 280:     where
+ 281:         F: FnOnce(Vec<u8>) -> Result<Vec<u8>, String>,
+ 282:     {
+ 283:         if max_message_bytes == 0 {
+ 284:             return Err("named-pipe max_message_bytes must be greater than zero".to_string());
+ 285:         }
+ 286:         let security = OwnedSecurityAttributes::from_sddl(security_sddl)?;
+ 287:         let wide_path = to_wide(path);
+ 288:         let message_bytes = u32::try_from(max_message_bytes)
+ 289:             .map_err(|_| "named-pipe max_message_bytes exceeds u32".to_string())?;
+ 290:         let open_mode: FILE_FLAGS_AND_ATTRIBUTES =
+ 291:             PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE;
+ 292:         let pipe_mode =
+ 293:             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
+ 294:         let handle = unsafe {
+ 295:             CreateNamedPipeW(
+ 296:                 wide_path.as_ptr(),
+ 297:                 open_mode,
+ 298:                 pipe_mode,
+ 299:                 PIPE_UNLIMITED_INSTANCES,
+ 300:                 message_bytes,
+ 301:                 message_bytes,
+ 302:                 5_000,
+ 303:                 security.as_ptr(),
+ 304:             )
+ 305:         };
+ 306:         let handle = OwnedHandle::new(handle).ok_or_else(|| {
+ 307:             format!("CreateNamedPipeW failed with Windows error {}", unsafe {
+ 308:                 GetLastError()
+ 309:             })
+ 310:         })?;
+ 311: 
+ 312:         let connected = unsafe { ConnectNamedPipe(handle.raw(), null_mut()) };
+ 313:         if connected == 0 {
+ 314:             let err = unsafe { GetLastError() };
+ 315:             if err != ERROR_PIPE_CONNECTED {
+ 316:                 return Err(format!("ConnectNamedPipe failed with Windows error {err}"));
+ 317:             }
+ 318:         }
+ 319: 
+ 320:         let request = read_pipe_message(handle.raw(), max_message_bytes)?;
+ 321:         let response = handler(request)?;
+ 322:         if response.len() > max_message_bytes {
+ 323:             return Err(format!(
+ 324:                 "named-pipe response exceeds maximum size ({} > {max_message_bytes})",
+ 325:                 response.len()
+ 326:             ));
+ 327:         }
+ 328:         write_pipe_message(handle.raw(), &response)?;
+ 329:         unsafe {
+ 330:             DisconnectNamedPipe(handle.raw());
+ 331:         }
+ 332:         Ok(())
+ 333:     }
+ 334: 
+ 335:     pub fn call_named_pipe(
+ 336:         path: &str,
+ 337:         request: &[u8],
+ 338:         max_response_bytes: usize,
+ 339:         timeout: Duration,
+ 340:     ) -> Result<Vec<u8>, String> {
+ 341:         if request.is_empty() {
+ 342:             return Err("named-pipe request must not be empty".to_string());
+ 343:         }
+ 344:         let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+ 345:         let request_len = u32::try_from(request.len())
+ 346:             .map_err(|_| "named-pipe request exceeds u32".to_string())?;
+ 347:         let mut response = vec![0u8; max_response_bytes];
+ 348:         let mut bytes_read = 0u32;
+ 349:         let wide_path = to_wide(path);
+ 350:         let ok = unsafe {
+ 351:             CallNamedPipeW(
+ 352:                 wide_path.as_ptr(),
+ 353:                 request.as_ptr().cast::<c_void>(),
+ 354:                 request_len,
+ 355:                 response.as_mut_ptr().cast::<c_void>(),
+ 356:                 u32::try_from(response.len())
+ 357:                     .map_err(|_| "named-pipe response buffer exceeds u32".to_string())?,
+ 358:                 &mut bytes_read,
+ 359:                 timeout_ms,
+ 360:             )
+ 361:         };
+ 362:         if ok == 0 {
+ 363:             return Err(format!(
+ 364:                 "CallNamedPipeW failed with Windows error {}",
+ 365:                 unsafe { GetLastError() }
+ 366:             ));
+ 367:         }
+ 368:         response.truncate(bytes_read as usize);
+ 369:         Ok(response)
+ 370:     }
+ 371: 
+ 372:     fn read_pipe_message(handle: HANDLE, max_message_bytes: usize) -> Result<Vec<u8>, String> {
+ 373:         let mut buffer = vec![0u8; max_message_bytes];
+ 374:         let mut bytes_read = 0u32;
+ 375:         let ok = unsafe {
+ 376:             ReadFile(
+ 377:                 handle,
+ 378:                 buffer.as_mut_ptr(),
+ 379:                 u32::try_from(buffer.len())
+ 380:                     .map_err(|_| "named-pipe read buffer exceeds u32".to_string())?,
+ 381:                 &mut bytes_read,
+ 382:                 null_mut(),
+ 383:             )
+ 384:         };
+ 385:         if ok == 0 {
+ 386:             let err = unsafe { GetLastError() };
+ 387:             if err == ERROR_MORE_DATA {
+ 388:                 return Err(format!(
+ 389:                     "named-pipe request exceeds maximum size ({max_message_bytes} bytes)"
+ 390:                 ));
+ 391:             }
+ 392:             return Err(format!(
+ 393:                 "ReadFile on named pipe failed with Windows error {err}"
+ 394:             ));
+ 395:         }
+ 396:         buffer.truncate(bytes_read as usize);
+ 397:         Ok(buffer)
+ 398:     }
+ 399: 
+ 400:     fn write_pipe_message(handle: HANDLE, bytes: &[u8]) -> Result<(), String> {
+ 401:         let mut bytes_written = 0u32;
+ 402:         let ok = unsafe {
+ 403:             WriteFile(
+ 404:                 handle,
+ 405:                 bytes.as_ptr(),
+ 406:                 u32::try_from(bytes.len())
+ 407:                     .map_err(|_| "named-pipe write buffer exceeds u32".to_string())?,
+ 408:                 &mut bytes_written,
+ 409:                 null_mut(),
+ 410:             )
+ 411:         };
+ 412:         if ok == 0 {
+ 413:             return Err(format!(
+ 414:                 "WriteFile on named pipe failed with Windows error {}",
+ 415:                 unsafe { GetLastError() }
+ 416:             ));
+ 417:         }
+ 418:         if bytes_written as usize != bytes.len() {
+ 419:             return Err(format!(
+ 420:                 "WriteFile on named pipe wrote {} of {} bytes",
+ 421:                 bytes_written,
+ 422:                 bytes.len()
+ 423:             ));
+ 424:         }
+ 425:         let flushed = unsafe { FlushFileBuffers(handle) };
+ 426:         if flushed == 0 {
+ 427:             return Err(format!(
+ 428:                 "FlushFileBuffers on named pipe failed with Windows error {}",
+ 429:                 unsafe { GetLastError() }
+ 430:             ));
+ 431:         }
+ 432:         Ok(())
+ 433:     }
+ 434: 
+ 435:     fn security_descriptor_to_sddl(security_descriptor: *mut c_void) -> Result<String, String> {
+ 436:         let mut sddl_ptr = null_mut();
+ 437:         let ok = unsafe {
+ 438:             ConvertSecurityDescriptorToStringSecurityDescriptorW(
+ 439:                 security_descriptor,
+ 440:                 SDDL_REVISION_1,
+ 441:                 OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+ 442:                 &mut sddl_ptr,
+ 443:                 null_mut(),
+ 444:             )
+ 445:         };
+ 446:         if ok == 0 {
+ 447:             return Err(format!(
+ 448:                 "ConvertSecurityDescriptorToStringSecurityDescriptorW failed with Windows error {}",
+ 449:                 unsafe { GetLastError() }
+ 450:             ));
+ 451:         }
+ 452:         owned_pwstr_to_string(sddl_ptr)
+ 453:     }
+ 454: 
+ 455:     fn sid_to_string(sid: *mut c_void) -> Result<String, String> {
+ 456:         let mut sid_ptr = null_mut();
+ 457:         let ok = unsafe { ConvertSidToStringSidW(sid, &mut sid_ptr) };
+ 458:         if ok == 0 {
+ 459:             return Err(format!(
+ 460:                 "ConvertSidToStringSidW failed with Windows error {}",
+ 461:                 unsafe { GetLastError() }
+ 462:             ));
+ 463:         }
+ 464:         owned_pwstr_to_string(sid_ptr)
+ 465:     }
+ 466: 
+ 467:     fn owned_pwstr_to_string(ptr: *mut u16) -> Result<String, String> {
+ 468:         if ptr.is_null() {
+ 469:             return Err("Windows API returned a null wide-string pointer".to_string());
+ 470:         }
+ 471:         let mut len = 0usize;
+ 472:         unsafe {
+ 473:             while *ptr.add(len) != 0 {
+ 474:                 len += 1;
+ 475:             }
+ 476:             let slice = std::slice::from_raw_parts(ptr, len);
+ 477:             let value =
+ 478:                 String::from_utf16(slice).map_err(|err| format!("UTF-16 decode failed: {err}"))?;
+ 479:             LocalFree(ptr.cast::<c_void>());
+ 480:             Ok(value)
+ 481:         }
+ 482:     }
+ 483: 
+ 484:     fn blob_from_slice(value: &[u8]) -> Result<CRYPT_INTEGER_BLOB, String> {
+ 485:         let len = u32::try_from(value.len()).map_err(|_| "buffer exceeds u32".to_string())?;
+ 486:         Ok(CRYPT_INTEGER_BLOB {
+ 487:             cbData: len,
+ 488:             pbData: value.as_ptr().cast_mut(),
+ 489:         })
+ 490:     }
+ 491: 
+ 492:     fn empty_blob() -> CRYPT_INTEGER_BLOB {
+ 493:         CRYPT_INTEGER_BLOB {
+ 494:             cbData: 0,
+ 495:             pbData: null_mut(),
+ 496:         }
+ 497:     }
+ 498: 
+ 499:     fn blob_to_vec(blob: &mut CRYPT_INTEGER_BLOB) -> Result<Vec<u8>, String> {
+ 500:         if blob.pbData.is_null() || blob.cbData == 0 {
+ 501:             return Err("Windows API returned an empty blob".to_string());
+ 502:         }
+ 503:         let value =
+ 504:             unsafe { std::slice::from_raw_parts(blob.pbData, blob.cbData as usize) }.to_vec();
+ 505:         unsafe {
+ 506:             LocalFree(blob.pbData.cast::<c_void>());
+ 507:         }
+ 508:         blob.pbData = null_mut();
+ 509:         blob.cbData = 0;
+ 510:         Ok(value)
+ 511:     }
+ 512: 
+ 513:     fn to_wide(value: &str) -> Vec<u16> {
+ 514:         value.encode_utf16().chain(std::iter::once(0)).collect()
+ 515:     }
+ 516: 
+ 517:     fn to_wide_os(value: &std::ffi::OsStr) -> Vec<u16> {
+ 518:         use std::os::windows::ffi::OsStrExt;
+ 519:         value.encode_wide().chain(std::iter::once(0)).collect()
+ 520:     }
+ 521: 
+ 522:     struct OwnedHandle(HANDLE);
+ 523: 
+ 524:     impl OwnedHandle {
+ 525:         fn new(handle: HANDLE) -> Option<Self> {
+ 526:             if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+ 527:                 return None;
+ 528:             }
+ 529:             Some(Self(handle))
+ 530:         }
+ 531: 
+ 532:         fn raw(&self) -> HANDLE {
+ 533:             self.0
+ 534:         }
+ 535:     }
+ 536: 
+ 537:     impl Drop for OwnedHandle {
+ 538:         fn drop(&mut self) {
+ 539:             unsafe {
+ 540:                 CloseHandle(self.0);
+ 541:             }
+ 542:         }
+ 543:     }
+ 544: 
+ 545:     struct OwnedSecurityAttributes {
+ 546:         attributes: SECURITY_ATTRIBUTES,
+ 547:         descriptor: PSECURITY_DESCRIPTOR,
+ 548:     }
+ 549: 
+ 550:     impl OwnedSecurityAttributes {
+ 551:         fn from_sddl(sddl: &str) -> Result<Self, String> {
+ 552:             let mut descriptor = null_mut();
+ 553:             let wide_sddl = to_wide(sddl);
+ 554:             let ok = unsafe {
+ 555:                 ConvertStringSecurityDescriptorToSecurityDescriptorW(
+ 556:                     wide_sddl.as_ptr(),
+ 557:                     SDDL_REVISION_1 as u32,
+ 558:                     &mut descriptor,
+ 559:                     null_mut(),
+ 560:                 )
+ 561:             };
+ 562:             if ok == 0 || descriptor.is_null() {
+ 563:                 return Err(format!(
+ 564:                     "ConvertStringSecurityDescriptorToSecurityDescriptorW failed with Windows error {}",
+ 565:                     unsafe { GetLastError() }
+ 566:                 ));
+ 567:             }
+ 568:             Ok(Self {
+ 569:                 attributes: SECURITY_ATTRIBUTES {
+ 570:                     nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+ 571:                     lpSecurityDescriptor: descriptor.cast::<c_void>(),
+ 572:                     bInheritHandle: 0,
+ 573:                 },
+ 574:                 descriptor,
+ 575:             })
+ 576:         }
+ 577: 
+ 578:         fn as_ptr(&self) -> *const SECURITY_ATTRIBUTES {
+ 579:             &self.attributes
+ 580:         }
+ 581:     }
+ 582: 
+ 583:     impl Drop for OwnedSecurityAttributes {
+ 584:         fn drop(&mut self) {
+ 585:             if !self.descriptor.is_null() {
+ 586:                 unsafe {
+ 587:                     LocalFree(self.descriptor.cast::<c_void>());
+ 588:                 }
+ 589:                 self.descriptor = null_mut();
+ 590:             }
+ 591:         }
+ 592:     }
+ 593: 
+ 594:     #[allow(dead_code)]
+ 595:     fn inspect_handle_sddl(handle: HANDLE) -> Result<String, String> {
+ 596:         let requested = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+ 597:         let mut needed = 0u32;
+ 598:         let first =
+ 599:             unsafe { GetKernelObjectSecurity(handle, requested, null_mut(), 0, &mut needed) };
+ 600:         if first != 0 {
+ 601:             return Err(
+ 602:                 "GetKernelObjectSecurity unexpectedly succeeded with a zero-length buffer"
+ 603:                     .to_string(),
+ 604:             );
+ 605:         }
+ 606:         let err = unsafe { GetLastError() };
+ 607:         if err != ERROR_INSUFFICIENT_BUFFER || needed == 0 {
+ 608:             return Err(format!(
+ 609:                 "GetKernelObjectSecurity sizing failed with Windows error {err}"
+ 610:             ));
+ 611:         }
+ 612:         let mut buffer = vec![0u8; needed as usize];
+ 613:         let ok = unsafe {
+ 614:             GetKernelObjectSecurity(
+ 615:                 handle,
+ 616:                 requested,
+ 617:                 buffer.as_mut_ptr().cast::<c_void>(),
+ 618:                 needed,
+ 619:                 &mut needed,
+ 620:             )
+ 621:         };
+ 622:         if ok == 0 {
+ 623:             return Err(format!(
+ 624:                 "GetKernelObjectSecurity failed with Windows error {}",
+ 625:                 unsafe { GetLastError() }
+ 626:             ));
+ 627:         }
+ 628:         security_descriptor_to_sddl(buffer.as_mut_ptr().cast::<c_void>())
+ 629:     }
+ 630: 
+ 631:     /// Authenticode chain validation via `WinVerifyTrust`. Wraps the
+ 632:     /// canonical `WINTRUST_ACTION_GENERIC_VERIFY_V2` verb with
+ 633:     /// chain-revocation checking enabled (`WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT`)
+ 634:     /// and the UI suppressed (`WTD_UI_NONE`). Verification succeeds
+ 635:     /// only when the full PKCS#7 chain is trusted, the file digest
+ 636:     /// matches the SpcIndirectData, and any counter-signature
+ 637:     /// timestamps are valid; any of those failing maps to a typed
+ 638:     /// `Untrusted` outcome with the canonical HRESULT label.
+ 639:     ///
+ 640:     /// State cleanup: the Win32 contract requires a follow-up call
+ 641:     /// with `dwStateAction = WTD_STATEACTION_CLOSE` after every
+ 642:     /// `WTD_STATEACTION_VERIFY`. The wrapper performs the cleanup
+ 643:     /// even when the verify call returns an error so we do not leak
+ 644:     /// the verifier state into subsequent calls.
+ 645:     pub fn verify_authenticode_chain(
+ 646:         path: &Path,
+ 647:     ) -> Result<super::AuthenticodeChainOutcome, String> {
+ 648:         use std::os::windows::ffi::OsStrExt;
+ 649:         use windows_sys::Win32::Security::WinTrust::{
+ 650:             WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
+ 651:             WTD_CHOICE_FILE, WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, WTD_STATEACTION_CLOSE,
+ 652:             WTD_STATEACTION_VERIFY, WTD_UI_NONE, WinVerifyTrust,
+ 653:         };
+ 654: 
+ 655:         // Reject empty paths up-front — passing an empty string to
+ 656:         // WinVerifyTrust would surface as a confusing internal error
+ 657:         // rather than a clear "bad input" rejection.
+ 658:         if path.as_os_str().is_empty() {
+ 659:             return Err("verify_authenticode_chain: path must not be empty".to_string());
+ 660:         }
+ 661: 
+ 662:         // Encode path as UTF-16 with explicit NUL terminator. The
+ 663:         // Win32 wide-string contract requires the caller to provide
+ 664:         // the NUL.
+ 665:         let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+ 666:         wide.push(0);
+ 667: 
+ 668:         let mut file_info = WINTRUST_FILE_INFO {
+ 669:             cbStruct: size_of::<WINTRUST_FILE_INFO>() as u32,
+ 670:             pcwszFilePath: wide.as_ptr(),
+ 671:             hFile: null_mut(),
+ 672:             pgKnownSubject: null_mut(),
+ 673:         };
+ 674: 
+ 675:         let mut wvt_data = WINTRUST_DATA {
+ 676:             cbStruct: size_of::<WINTRUST_DATA>() as u32,
+ 677:             pPolicyCallbackData: null_mut(),
+ 678:             pSIPClientData: null_mut(),
+ 679:             dwUIChoice: WTD_UI_NONE,
+ 680:             fdwRevocationChecks: WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT,
+ 681:             dwUnionChoice: WTD_CHOICE_FILE,
+ 682:             Anonymous: WINTRUST_DATA_0 {
+ 683:                 pFile: &mut file_info,
+ 684:             },
+ 685:             dwStateAction: WTD_STATEACTION_VERIFY,
+ 686:             hWVTStateData: null_mut(),
+ 687:             pwszURLReference: null_mut(),
+ 688:             dwProvFlags: 0,
+ 689:             dwUIContext: 0,
+ 690:             pSignatureSettings: null_mut(),
+ 691:         };
+ 692: 
+ 693:         let mut action_guid = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+ 694:         let verify_status = unsafe {
+ 695:             WinVerifyTrust(
+ 696:                 null_mut(),
+ 697:                 &mut action_guid,
+ 698:                 &mut wvt_data as *mut WINTRUST_DATA as *mut c_void,
+ 699:             )
+ 700:         };
+ 701: 
+ 702:         // Always cleanup state, even on verify failure, to avoid
+ 703:         // leaking handles/state into subsequent calls.
+ 704:         wvt_data.dwStateAction = WTD_STATEACTION_CLOSE;
+ 705:         let _ = unsafe {
+ 706:             WinVerifyTrust(
+ 707:                 null_mut(),
+ 708:                 &mut action_guid,
+ 709:                 &mut wvt_data as *mut WINTRUST_DATA as *mut c_void,
+ 710:             )
+ 711:         };
+ 712: 
+ 713:         if verify_status == 0 {
+ 714:             Ok(super::AuthenticodeChainOutcome::Verified)
+ 715:         } else {
+ 716:             let raw_u32 = verify_status as u32;
+ 717:             let label = match raw_u32 {
+ 718:                 0x800B0001 => "TRUST_E_PROVIDER_UNKNOWN",
+ 719:                 0x800B0100 => "TRUST_E_NOSIGNATURE",
+ 720:                 0x800B0101 => "CERT_E_EXPIRED",
+ 721:                 0x800B0102 => "CERT_E_VALIDITYPERIODNESTING",
+ 722:                 0x800B0103 => "CERT_E_ROLE",
+ 723:                 0x800B0104 => "CERT_E_PATHLENCONST",
+ 724:                 0x800B0105 => "CERT_E_CRITICAL",
+ 725:                 0x800B0106 => "CERT_E_PURPOSE",
+ 726:                 0x800B0107 => "CERT_E_ISSUERCHAINING",
+ 727:                 0x800B0108 => "CERT_E_MALFORMED",
+ 728:                 0x800B0109 => "CERT_E_UNTRUSTEDROOT",
+ 729:                 0x800B010A => "CERT_E_CHAINING",
+ 730:                 0x800B010B => "TRUST_E_FAIL",
+ 731:                 0x800B010C => "CERT_E_REVOKED",
+ 732:                 0x800B010D => "CERT_E_UNTRUSTEDTESTROOT",
+ 733:                 0x800B010E => "CERT_E_REVOCATION_FAILURE",
+ 734:                 0x80092010 => "CRYPT_E_REVOKED",
+ 735:                 0x80092012 => "CRYPT_E_NO_REVOCATION_CHECK",
+ 736:                 0x80092013 => "CRYPT_E_REVOCATION_OFFLINE",
+ 737:                 0x80096010 => "TRUST_E_BAD_DIGEST",
+ 738:                 0x800B0110 => "TRUST_E_CERT_SIGNATURE",
+ 739:                 0x800B0111 => "TRUST_E_TIME_STAMP",
+ 740:                 _ => "UNKNOWN",
+ 741:             };
+ 742:             let reason = format!(
+ 743:                 "WinVerifyTrust returned 0x{raw_u32:08x} ({label}) for {}",
+ 744:                 path.display()
+ 745:             );
+ 746:             Ok(super::AuthenticodeChainOutcome::Untrusted {
+ 747:                 reason,
+ 748:                 hresult: verify_status as i64,
+ 749:             })
+ 750:         }
+ 751:     }
+ 752: }
+ 753: 
+ 754: #[cfg(windows)]
+ 755: pub use imp::{
+ 756:     call_named_pipe, dpapi_protect, dpapi_unprotect, inspect_file_sddl, lookup_account_sid_string,
+ 757:     serve_named_pipe_one_message, verify_authenticode_chain,
+ 758: };
+
+===== /crates/rustynet-windows-native/Cargo.toml =====
+
+   1: [package]
+   2: name = "rustynet-windows-native"
+   3: version.workspace = true
+   4: edition.workspace = true
+   5: license.workspace = true
+   6: authors.workspace = true
+   7: 
+   8: [target.'cfg(windows)'.dependencies]
+   9: windows-sys = { version = "0.59.0", features = [
+  10:     "Win32_Foundation",
+  11:     "Win32_Security",
+  12:     "Win32_Security_Authorization",
+  13:     "Win32_Security_Cryptography",
+  14:     "Win32_Security_WinTrust",
+  15:     "Win32_Storage_FileSystem",
+  16:     "Win32_System_IO",
+  17:     "Win32_System_Pipes",
+  18: ] }
+
