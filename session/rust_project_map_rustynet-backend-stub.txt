@@ -1,0 +1,796 @@
+# Rust Project Map — rustynet-backend-stub
+
+Root: /Users/iwan/Desktop/Rustynet
+Captured: 2026-05-06T15:06:09+01:00
+Git: branch `main` @ 8a9c3eab12fe  ·  uncommitted files: 0
+Files: 3  ·  Lines of source: 754
+
+## Crate Dependencies (within this workspace)
+
+Depends on (workspace): rustynet-backend-api
+Depended on by (workspace): (none — top-level crate)
+
+## Public API Surface
+
+1 public items across 1 file(s).
+
+/crates/rustynet-backend-stub/src/lib.rs
+  L   11  pub struct StubBackend
+
+
+## Document Tree
+
+`-- crates
+    `-- rustynet-backend-stub
+        |-- Cargo.toml  (12 lines)
+        |-- src
+        |   `-- lib.rs  (222 lines)
+        `-- tests
+            `-- stub_conformance.rs  (520 lines)  — TunnelBackend conformance suite run against StubBackend.
+
+
+## Files
+
+===== /crates/rustynet-backend-stub/src/lib.rs =====
+
+   1: #![forbid(unsafe_code)]
+   2: 
+   3: use std::collections::BTreeMap;
+   4: 
+   5: use rustynet_backend_api::{
+   6:     BackendCapabilities, BackendError, ExitMode, NodeId, PeerConfig, Route, RuntimeContext,
+   7:     SocketEndpoint, TunnelBackend, TunnelStats,
+   8: };
+   9: 
+  10: #[derive(Debug, Clone)]
+  11: pub struct StubBackend {
+  12:     running: bool,
+  13:     peers: BTreeMap<NodeId, PeerConfig>,
+  14:     peer_latest_handshakes: BTreeMap<NodeId, Option<u64>>,
+  15:     routes: Vec<Route>,
+  16:     exit_mode: ExitMode,
+  17: }
+  18: 
+  19: impl Default for StubBackend {
+  20:     fn default() -> Self {
+  21:         Self {
+  22:             running: false,
+  23:             peers: BTreeMap::new(),
+  24:             peer_latest_handshakes: BTreeMap::new(),
+  25:             routes: Vec::new(),
+  26:             exit_mode: ExitMode::Off,
+  27:         }
+  28:     }
+  29: }
+  30: 
+  31: impl StubBackend {
+  32:     fn ensure_running(&self) -> Result<(), BackendError> {
+  33:         if self.running {
+  34:             return Ok(());
+  35:         }
+  36:         Err(BackendError::not_running("stub backend is not running"))
+  37:     }
+  38: }
+  39: 
+  40: impl TunnelBackend for StubBackend {
+  41:     fn name(&self) -> &'static str {
+  42:         "stub-backend"
+  43:     }
+  44: 
+  45:     fn capabilities(&self) -> BackendCapabilities {
+  46:         BackendCapabilities {
+  47:             supports_roaming: false,
+  48:             supports_exit_nodes: true,
+  49:             supports_lan_routes: true,
+  50:             supports_ipv6: false,
+  51:         }
+  52:     }
+  53: 
+  54:     fn start(&mut self, _context: RuntimeContext) -> Result<(), BackendError> {
+  55:         if self.running {
+  56:             return Err(BackendError::already_running(
+  57:                 "stub backend already started",
+  58:             ));
+  59:         }
+  60:         self.running = true;
+  61:         Ok(())
+  62:     }
+  63: 
+  64:     fn configure_peer(&mut self, peer: PeerConfig) -> Result<(), BackendError> {
+  65:         self.ensure_running()?;
+  66:         self.peer_latest_handshakes
+  67:             .entry(peer.node_id.clone())
+  68:             .or_insert(None);
+  69:         self.peers.insert(peer.node_id.clone(), peer);
+  70:         Ok(())
+  71:     }
+  72: 
+  73:     fn update_peer_endpoint(
+  74:         &mut self,
+  75:         node_id: &NodeId,
+  76:         endpoint: SocketEndpoint,
+  77:     ) -> Result<(), BackendError> {
+  78:         self.ensure_running()?;
+  79:         let Some(peer) = self.peers.get_mut(node_id) else {
+  80:             return Err(BackendError::invalid_input("peer is not configured"));
+  81:         };
+  82:         peer.endpoint = endpoint;
+  83:         Ok(())
+  84:     }
+  85: 
+  86:     fn current_peer_endpoint(
+  87:         &self,
+  88:         node_id: &NodeId,
+  89:     ) -> Result<Option<SocketEndpoint>, BackendError> {
+  90:         self.ensure_running()?;
+  91:         Ok(self.peers.get(node_id).map(|peer| peer.endpoint))
+  92:     }
+  93: 
+  94:     fn peer_latest_handshake_unix(
+  95:         &mut self,
+  96:         node_id: &NodeId,
+  97:     ) -> Result<Option<u64>, BackendError> {
+  98:         self.ensure_running()?;
+  99:         if !self.peers.contains_key(node_id) {
+ 100:             return Err(BackendError::invalid_input("peer is not configured"));
+ 101:         }
+ 102:         Ok(self.peer_latest_handshakes.get(node_id).copied().flatten())
+ 103:     }
+ 104: 
+ 105:     fn remove_peer(&mut self, node_id: &NodeId) -> Result<(), BackendError> {
+ 106:         self.ensure_running()?;
+ 107:         self.peers.remove(node_id);
+ 108:         self.peer_latest_handshakes.remove(node_id);
+ 109:         Ok(())
+ 110:     }
+ 111: 
+ 112:     fn apply_routes(&mut self, routes: Vec<Route>) -> Result<(), BackendError> {
+ 113:         self.ensure_running()?;
+ 114:         self.routes = routes;
+ 115:         Ok(())
+ 116:     }
+ 117: 
+ 118:     fn set_exit_mode(&mut self, mode: ExitMode) -> Result<(), BackendError> {
+ 119:         self.ensure_running()?;
+ 120:         self.exit_mode = mode;
+ 121:         Ok(())
+ 122:     }
+ 123: 
+ 124:     fn stats(&self) -> Result<TunnelStats, BackendError> {
+ 125:         self.ensure_running()?;
+ 126:         Ok(TunnelStats {
+ 127:             peer_count: self.peers.len(),
+ 128:             bytes_tx: 0,
+ 129:             bytes_rx: 0,
+ 130:             using_relay_path: false,
+ 131:         })
+ 132:     }
+ 133: 
+ 134:     fn shutdown(&mut self) -> Result<(), BackendError> {
+ 135:         self.ensure_running()?;
+ 136:         self.running = false;
+ 137:         self.peers.clear();
+ 138:         self.peer_latest_handshakes.clear();
+ 139:         self.routes.clear();
+ 140:         self.exit_mode = ExitMode::Off;
+ 141:         Ok(())
+ 142:     }
+ 143: }
+ 144: 
+ 145: #[cfg(test)]
+ 146: mod tests {
+ 147:     use rustynet_backend_api::{
+ 148:         BackendErrorKind, ExitMode, NodeId, PeerConfig, Route, RouteKind, RuntimeContext,
+ 149:         SocketEndpoint, TunnelBackend,
+ 150:     };
+ 151: 
+ 152:     use super::StubBackend;
+ 153: 
+ 154:     fn context() -> RuntimeContext {
+ 155:         RuntimeContext {
+ 156:             local_node: NodeId::new("stub-local").expect("node id should be valid"),
+ 157:             interface_name: "rustynet0".to_string(),
+ 158:             mesh_cidr: "100.64.0.0/10".to_string(),
+ 159:             local_cidr: "100.64.0.1/32".to_string(),
+ 160:         }
+ 161:     }
+ 162: 
+ 163:     fn peer(id: &str) -> PeerConfig {
+ 164:         PeerConfig {
+ 165:             node_id: NodeId::new(id).expect("node id should be valid"),
+ 166:             endpoint: SocketEndpoint {
+ 167:                 addr: "198.51.100.5".parse().expect("ip should parse"),
+ 168:                 port: 51820,
+ 169:             },
+ 170:             public_key: [9; 32],
+ 171:             allowed_ips: vec!["100.100.10.1/32".to_string()],
+ 172:         }
+ 173:     }
+ 174: 
+ 175:     #[test]
+ 176:     fn stub_backend_passes_lifecycle_and_peer_route_flow() {
+ 177:         let mut backend = StubBackend::default();
+ 178:         backend.start(context()).expect("start should succeed");
+ 179:         backend
+ 180:             .configure_peer(peer("peer-a"))
+ 181:             .expect("configure should succeed");
+ 182:         backend
+ 183:             .update_peer_endpoint(
+ 184:                 &NodeId::new("peer-a").expect("node id should be valid"),
+ 185:                 SocketEndpoint {
+ 186:                     addr: "203.0.113.9".parse().expect("ip should parse"),
+ 187:                     port: 51821,
+ 188:                 },
+ 189:             )
+ 190:             .expect("endpoint update should succeed");
+ 191:         assert_eq!(
+ 192:             backend
+ 193:                 .current_peer_endpoint(&NodeId::new("peer-a").expect("node id should be valid"))
+ 194:                 .expect("current endpoint query should succeed"),
+ 195:             Some(SocketEndpoint {
+ 196:                 addr: "203.0.113.9".parse().expect("ip should parse"),
+ 197:                 port: 51821,
+ 198:             })
+ 199:         );
+ 200:         backend
+ 201:             .apply_routes(vec![Route {
+ 202:                 destination_cidr: "0.0.0.0/0".to_string(),
+ 203:                 via_node: NodeId::new("peer-a").expect("node id should be valid"),
+ 204:                 kind: RouteKind::ExitNodeDefault,
+ 205:             }])
+ 206:             .expect("route apply should succeed");
+ 207:         backend
+ 208:             .set_exit_mode(ExitMode::FullTunnel)
+ 209:             .expect("exit mode should succeed");
+ 210:         assert_eq!(backend.stats().expect("stats should work").peer_count, 1);
+ 211:         backend.shutdown().expect("shutdown should succeed");
+ 212:     }
+ 213: 
+ 214:     #[test]
+ 215:     fn stub_backend_rejects_mutation_while_stopped() {
+ 216:         let mut backend = StubBackend::default();
+ 217:         let err = backend
+ 218:             .configure_peer(peer("peer-a"))
+ 219:             .expect_err("configure should fail while stopped");
+ 220:         assert_eq!(err.kind, BackendErrorKind::NotRunning);
+ 221:     }
+ 222: }
+
+===== /crates/rustynet-backend-stub/Cargo.toml =====
+
+   1: [package]
+   2: name = "rustynet-backend-stub"
+   3: version.workspace = true
+   4: edition.workspace = true
+   5: license.workspace = true
+   6: authors.workspace = true
+   7: 
+   8: [dependencies]
+   9: rustynet-backend-api = { path = "../rustynet-backend-api" }
+  10: 
+  11: [dev-dependencies]
+  12: rustynet-backend-api = { path = "../rustynet-backend-api" }
+
+===== /crates/rustynet-backend-stub/tests/stub_conformance.rs =====
+
+   1: #![forbid(unsafe_code)]
+   2: 
+   3: //! TunnelBackend conformance suite run against StubBackend.
+   4: //!
+   5: //! Each test scenario mirrors the equivalent test in
+   6: //! `rustynet-backend-api/tests/backend_contract.rs`.  Both files must be kept
+   7: //! in sync: any scenario added to `backend_contract.rs` must be added here too.
+   8: //!
+   9: //! Passing all scenarios demonstrates that `StubBackend` is a conformant
+  10: //! `TunnelBackend` implementation that can stand in for any backend in tests.
+  11: 
+  12: use std::net::{IpAddr, Ipv4Addr};
+  13: 
+  14: use rustynet_backend_api::{
+  15:     BackendErrorKind, ExitMode, NodeId, PeerConfig, Route, RouteKind, RuntimeContext,
+  16:     SocketEndpoint, TunnelBackend,
+  17: };
+  18: use rustynet_backend_stub::StubBackend;
+  19: 
+  20: // ── Shared test data helpers ───
+  21: 
+  22: fn sample_context() -> RuntimeContext {
+  23:     RuntimeContext {
+  24:         local_node: NodeId::new("local-node").expect("valid node id"),
+  25:         interface_name: "rustynet0".to_string(),
+  26:         mesh_cidr: "100.64.0.0/10".to_string(),
+  27:         local_cidr: "100.64.0.1/32".to_string(),
+  28:     }
+  29: }
+  30: 
+  31: fn peer(name: &str) -> PeerConfig {
+  32:     PeerConfig {
+  33:         node_id: NodeId::new(name).expect("valid node id"),
+  34:         endpoint: SocketEndpoint {
+  35:             addr: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)),
+  36:             port: 51820,
+  37:         },
+  38:         public_key: [7; 32],
+  39:         allowed_ips: vec!["100.64.1.0/24".to_string()],
+  40:     }
+  41: }
+  42: 
+  43: fn peer_with_key(name: &str, key_byte: u8) -> PeerConfig {
+  44:     PeerConfig {
+  45:         node_id: NodeId::new(name).expect("valid node id"),
+  46:         endpoint: SocketEndpoint {
+  47:             addr: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+  48:             port: 51820,
+  49:         },
+  50:         public_key: [key_byte; 32],
+  51:         allowed_ips: vec!["100.64.2.0/24".to_string()],
+  52:     }
+  53: }
+  54: 
+  55: fn nid(name: &str) -> NodeId {
+  56:     NodeId::new(name).expect("valid node id")
+  57: }
+  58: 
+  59: // ── Conformance scenario helpers ───
+  60: 
+  61: fn contract_not_running_rejects_mutations(b: &mut dyn TunnelBackend) {
+  62:     let p = peer("p1");
+  63:     let err = b
+  64:         .configure_peer(p)
+  65:         .expect_err("configure_peer must require running state");
+  66:     assert_eq!(err.kind, BackendErrorKind::NotRunning);
+  67: 
+  68:     let err = b
+  69:         .peer_latest_handshake_unix(&nid("p1"))
+  70:         .expect_err("handshake must require running state");
+  71:     assert_eq!(err.kind, BackendErrorKind::NotRunning);
+  72: 
+  73:     let err = b
+  74:         .apply_routes(vec![])
+  75:         .expect_err("apply_routes must require running state");
+  76:     assert_eq!(err.kind, BackendErrorKind::NotRunning);
+  77: 
+  78:     let err = b
+  79:         .remove_peer(&nid("p1"))
+  80:         .expect_err("remove_peer must require running state");
+  81:     assert_eq!(err.kind, BackendErrorKind::NotRunning);
+  82: 
+  83:     let err = b
+  84:         .set_exit_mode(ExitMode::FullTunnel)
+  85:         .expect_err("set_exit_mode must require running state");
+  86:     assert_eq!(err.kind, BackendErrorKind::NotRunning);
+  87: 
+  88:     let err = b.stats().expect_err("stats must require running state");
+  89:     assert_eq!(err.kind, BackendErrorKind::NotRunning);
+  90: 
+  91:     let err = b
+  92:         .shutdown()
+  93:         .expect_err("shutdown must require running state");
+  94:     assert_eq!(err.kind, BackendErrorKind::NotRunning);
+  95: }
+  96: 
+  97: fn contract_start_is_idempotent_reject(b: &mut dyn TunnelBackend) {
+  98:     b.start(sample_context()).expect("first start must succeed");
+  99:     let err = b
+ 100:         .start(sample_context())
+ 101:         .expect_err("second start must fail");
+ 102:     assert_eq!(err.kind, BackendErrorKind::AlreadyRunning);
+ 103:     b.shutdown().expect("shutdown after double-start attempt");
+ 104: }
+ 105: 
+ 106: fn contract_start_and_shutdown_lifecycle(b: &mut dyn TunnelBackend) {
+ 107:     b.start(sample_context()).expect("start");
+ 108:     b.configure_peer(peer("lifecycle-peer")).expect("configure");
+ 109:     b.shutdown().expect("shutdown");
+ 110:     let err = b
+ 111:         .configure_peer(peer("lifecycle-peer"))
+ 112:         .expect_err("ops after shutdown must fail");
+ 113:     assert_eq!(err.kind, BackendErrorKind::NotRunning);
+ 114:     b.start(sample_context()).expect("restart after shutdown");
+ 115:     b.shutdown().expect("second shutdown");
+ 116: }
+ 117: 
+ 118: fn contract_configure_peer_round_trip(b: &mut dyn TunnelBackend) {
+ 119:     b.start(sample_context()).expect("start");
+ 120:     let p = peer("rt-peer");
+ 121:     let endpoint = p.endpoint;
+ 122:     let node_id = p.node_id.clone();
+ 123:     b.configure_peer(p).expect("configure_peer");
+ 124:     let got = b
+ 125:         .current_peer_endpoint(&node_id)
+ 126:         .expect("current_peer_endpoint should succeed for known peer");
+ 127:     assert_eq!(got, Some(endpoint), "endpoint round-trip mismatch");
+ 128:     b.shutdown().expect("shutdown");
+ 129: }
+ 130: 
+ 131: fn contract_configure_peer_replaces_existing(b: &mut dyn TunnelBackend) {
+ 132:     b.start(sample_context()).expect("start");
+ 133:     let p1 = peer_with_key("replace-peer", 0x01);
+ 134:     let node_id = p1.node_id.clone();
+ 135:     b.configure_peer(p1).expect("first configure");
+ 136:     let p2 = peer_with_key("replace-peer", 0x02);
+ 137:     b.configure_peer(p2)
+ 138:         .expect("second configure replaces first");
+ 139:     b.current_peer_endpoint(&node_id)
+ 140:         .expect("endpoint should still be accessible after replace");
+ 141:     b.shutdown().expect("shutdown");
+ 142: }
+ 143: 
+ 144: fn contract_remove_peer_makes_it_absent(b: &mut dyn TunnelBackend) {
+ 145:     b.start(sample_context()).expect("start");
+ 146:     let p = peer("remove-me");
+ 147:     let node_id = p.node_id.clone();
+ 148:     b.configure_peer(p).expect("configure");
+ 149:     b.remove_peer(&node_id).expect("remove_peer");
+ 150:     let err = b
+ 151:         .peer_latest_handshake_unix(&node_id)
+ 152:         .expect_err("handshake of removed peer must fail");
+ 153:     assert_eq!(
+ 154:         err.kind,
+ 155:         BackendErrorKind::InvalidInput,
+ 156:         "removed peer must return InvalidInput"
+ 157:     );
+ 158:     let result = b.remove_peer(&node_id);
+ 159:     if let Err(e) = result {
+ 160:         assert_ne!(
+ 161:             e.kind,
+ 162:             BackendErrorKind::NotRunning,
+ 163:             "remove of absent peer must not return NotRunning"
+ 164:         );
+ 165:     }
+ 166:     b.shutdown().expect("shutdown");
+ 167: }
+ 168: 
+ 169: fn contract_update_endpoint_preserves_allowed_ips(b: &mut dyn TunnelBackend) {
+ 170:     b.start(sample_context()).expect("start");
+ 171:     let p = peer("ep-peer");
+ 172:     let node_id = p.node_id.clone();
+ 173:     b.configure_peer(p).expect("configure");
+ 174: 
+ 175:     let new_ep = SocketEndpoint {
+ 176:         addr: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 88)),
+ 177:         port: 443,
+ 178:     };
+ 179:     b.update_peer_endpoint(&node_id, new_ep)
+ 180:         .expect("update_peer_endpoint");
+ 181: 
+ 182:     let current = b
+ 183:         .current_peer_endpoint(&node_id)
+ 184:         .expect("current_peer_endpoint after update");
+ 185:     assert_eq!(current, Some(new_ep));
+ 186: 
+ 187:     b.peer_latest_handshake_unix(&node_id)
+ 188:         .expect("handshake must still succeed after endpoint update");
+ 189:     b.shutdown().expect("shutdown");
+ 190: }
+ 191: 
+ 192: fn contract_update_endpoint_unknown_peer_rejected(b: &mut dyn TunnelBackend) {
+ 193:     b.start(sample_context()).expect("start");
+ 194:     let ep = SocketEndpoint {
+ 195:         addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+ 196:         port: 51820,
+ 197:     };
+ 198:     let err = b
+ 199:         .update_peer_endpoint(&nid("ghost-peer"), ep)
+ 200:         .expect_err("update on unknown peer must fail");
+ 201:     assert_eq!(err.kind, BackendErrorKind::InvalidInput);
+ 202:     b.shutdown().expect("shutdown");
+ 203: }
+ 204: 
+ 205: fn contract_endpoint_unknown_peer_returns_none_or_error(b: &mut dyn TunnelBackend) {
+ 206:     b.start(sample_context()).expect("start");
+ 207:     let result = b.current_peer_endpoint(&nid("never-configured"));
+ 208:     match result {
+ 209:         Ok(None) => {}
+ 210:         Ok(Some(_)) => panic!("unconfigured peer should not have an endpoint"),
+ 211:         Err(e) => assert_eq!(
+ 212:             e.kind,
+ 213:             BackendErrorKind::InvalidInput,
+ 214:             "unconfigured peer endpoint error must be InvalidInput"
+ 215:         ),
+ 216:     }
+ 217:     b.shutdown().expect("shutdown");
+ 218: }
+ 219: 
+ 220: fn contract_handshake_unknown_peer_rejected(b: &mut dyn TunnelBackend) {
+ 221:     b.start(sample_context()).expect("start");
+ 222:     let err = b
+ 223:         .peer_latest_handshake_unix(&nid("unknown"))
+ 224:         .expect_err("handshake lookup on unconfigured peer must fail");
+ 225:     assert_eq!(err.kind, BackendErrorKind::InvalidInput);
+ 226:     b.shutdown().expect("shutdown");
+ 227: }
+ 228: 
+ 229: fn contract_handshake_known_peer_returns_none_initially(b: &mut dyn TunnelBackend) {
+ 230:     b.start(sample_context()).expect("start");
+ 231:     b.configure_peer(peer("hs-peer")).expect("configure");
+ 232:     let hs = b
+ 233:         .peer_latest_handshake_unix(&nid("hs-peer"))
+ 234:         .expect("handshake lookup must succeed for known peer");
+ 235:     assert_eq!(hs, None, "fresh peer should have no handshake timestamp");
+ 236:     b.shutdown().expect("shutdown");
+ 237: }
+ 238: 
+ 239: fn contract_routes_replaced_deterministically(b: &mut dyn TunnelBackend) {
+ 240:     b.start(sample_context()).expect("start");
+ 241:     b.apply_routes(vec![
+ 242:         Route {
+ 243:             destination_cidr: "192.168.0.0/24".to_string(),
+ 244:             via_node: nid("r-peer-a"),
+ 245:             kind: RouteKind::Mesh,
+ 246:         },
+ 247:         Route {
+ 248:             destination_cidr: "0.0.0.0/0".to_string(),
+ 249:             via_node: nid("r-peer-b"),
+ 250:             kind: RouteKind::ExitNodeDefault,
+ 251:         },
+ 252:     ])
+ 253:     .expect("first apply_routes");
+ 254: 
+ 255:     b.apply_routes(vec![Route {
+ 256:         destination_cidr: "10.0.0.0/8".to_string(),
+ 257:         via_node: nid("r-peer-c"),
+ 258:         kind: RouteKind::ExitNodeLan,
+ 259:     }])
+ 260:     .expect("second apply_routes replaces first");
+ 261: 
+ 262:     b.stats().expect("stats after routes replaced");
+ 263:     b.shutdown().expect("shutdown");
+ 264: }
+ 265: 
+ 266: fn contract_routes_cleared_on_empty_apply(b: &mut dyn TunnelBackend) {
+ 267:     b.start(sample_context()).expect("start");
+ 268:     b.apply_routes(vec![Route {
+ 269:         destination_cidr: "0.0.0.0/0".to_string(),
+ 270:         via_node: nid("exit-peer"),
+ 271:         kind: RouteKind::ExitNodeDefault,
+ 272:     }])
+ 273:     .expect("seed routes");
+ 274:     b.apply_routes(vec![])
+ 275:         .expect("clear routes via empty apply");
+ 276:     b.shutdown().expect("shutdown");
+ 277: }
+ 278: 
+ 279: fn contract_exit_mode_off_is_default(b: &mut dyn TunnelBackend) {
+ 280:     b.start(sample_context()).expect("start");
+ 281:     b.set_exit_mode(ExitMode::Off).expect("set exit mode off");
+ 282:     b.shutdown().expect("shutdown");
+ 283: }
+ 284: 
+ 285: fn contract_exit_mode_full_tunnel_accepted(b: &mut dyn TunnelBackend) {
+ 286:     b.start(sample_context()).expect("start");
+ 287:     b.set_exit_mode(ExitMode::FullTunnel)
+ 288:         .expect("set exit mode full tunnel");
+ 289:     b.set_exit_mode(ExitMode::Off)
+ 290:         .expect("reset exit mode to off");
+ 291:     b.shutdown().expect("shutdown");
+ 292: }
+ 293: 
+ 294: fn contract_stats_peer_count_reflects_configured_peers(b: &mut dyn TunnelBackend) {
+ 295:     b.start(sample_context()).expect("start");
+ 296:     let s0 = b.stats().expect("stats with no peers");
+ 297:     assert_eq!(s0.peer_count, 0);
+ 298: 
+ 299:     b.configure_peer(peer("stats-peer-1")).expect("configure 1");
+ 300:     b.configure_peer(peer("stats-peer-2")).expect("configure 2");
+ 301:     let s2 = b.stats().expect("stats with 2 peers");
+ 302:     assert_eq!(s2.peer_count, 2);
+ 303: 
+ 304:     b.remove_peer(&nid("stats-peer-1")).expect("remove peer 1");
+ 305:     let s1 = b.stats().expect("stats with 1 peer");
+ 306:     assert_eq!(s1.peer_count, 1);
+ 307: 
+ 308:     b.shutdown().expect("shutdown");
+ 309: }
+ 310: 
+ 311: fn contract_shutdown_then_ops_require_restart(b: &mut dyn TunnelBackend) {
+ 312:     b.start(sample_context()).expect("start");
+ 313:     b.shutdown().expect("shutdown");
+ 314:     let err = b.stats().expect_err("stats after shutdown must fail");
+ 315:     assert_eq!(err.kind, BackendErrorKind::NotRunning);
+ 316:     b.start(sample_context()).expect("re-start");
+ 317:     b.stats().expect("stats after re-start must succeed");
+ 318:     b.shutdown().expect("final shutdown");
+ 319: }
+ 320: 
+ 321: fn contract_multi_peer_isolated_operations(b: &mut dyn TunnelBackend) {
+ 322:     b.start(sample_context()).expect("start");
+ 323:     let p_a = peer_with_key("multi-a", 0xAA);
+ 324:     let p_b = peer_with_key("multi-b", 0xBB);
+ 325:     let id_a = p_a.node_id.clone();
+ 326:     let id_b = p_b.node_id.clone();
+ 327:     b.configure_peer(p_a).expect("configure a");
+ 328:     b.configure_peer(p_b).expect("configure b");
+ 329: 
+ 330:     let ep_new = SocketEndpoint {
+ 331:         addr: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 99)),
+ 332:         port: 51821,
+ 333:     };
+ 334:     b.update_peer_endpoint(&id_a, ep_new).expect("update a");
+ 335: 
+ 336:     let ep_b = b
+ 337:         .current_peer_endpoint(&id_b)
+ 338:         .expect("b's endpoint should be accessible");
+ 339:     assert!(ep_b.is_some(), "peer b must still have an endpoint");
+ 340:     assert_ne!(
+ 341:         ep_b.unwrap(),
+ 342:         ep_new,
+ 343:         "updating peer a must not affect peer b"
+ 344:     );
+ 345: 
+ 346:     b.remove_peer(&id_a).expect("remove a");
+ 347:     b.peer_latest_handshake_unix(&id_b)
+ 348:         .expect("peer b still accessible after removing peer a");
+ 349: 
+ 350:     b.shutdown().expect("shutdown");
+ 351: }
+ 352: 
+ 353: fn contract_configure_same_peer_multiple_ips(b: &mut dyn TunnelBackend) {
+ 354:     b.start(sample_context()).expect("start");
+ 355:     let base = PeerConfig {
+ 356:         node_id: nid("multi-ip-peer"),
+ 357:         endpoint: SocketEndpoint {
+ 358:             addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+ 359:             port: 51820,
+ 360:         },
+ 361:         public_key: [0x01; 32],
+ 362:         allowed_ips: vec![
+ 363:             "100.64.5.0/24".to_string(),
+ 364:             "192.168.100.0/24".to_string(),
+ 365:             "10.10.0.0/16".to_string(),
+ 366:         ],
+ 367:     };
+ 368:     b.configure_peer(base)
+ 369:         .expect("configure with multiple allowed IPs");
+ 370:     b.peer_latest_handshake_unix(&nid("multi-ip-peer"))
+ 371:         .expect("handshake accessible after multi-IP configure");
+ 372:     b.shutdown().expect("shutdown");
+ 373: }
+ 374: 
+ 375: /// Run all conformance scenarios against the given backend in sequence.
+ 376: ///
+ 377: /// Scenarios are order-dependent within this function (each starts/stops the
+ 378: /// backend cleanly so the next scenario starts from a stopped state).
+ 379: fn run_stub_conformance_suite(mut backend: StubBackend) {
+ 380:     contract_not_running_rejects_mutations(&mut backend);
+ 381:     contract_start_is_idempotent_reject(&mut backend);
+ 382:     contract_start_and_shutdown_lifecycle(&mut backend);
+ 383:     contract_configure_peer_round_trip(&mut backend);
+ 384:     contract_configure_peer_replaces_existing(&mut backend);
+ 385:     contract_remove_peer_makes_it_absent(&mut backend);
+ 386:     contract_update_endpoint_preserves_allowed_ips(&mut backend);
+ 387:     contract_update_endpoint_unknown_peer_rejected(&mut backend);
+ 388:     contract_endpoint_unknown_peer_returns_none_or_error(&mut backend);
+ 389:     contract_handshake_unknown_peer_rejected(&mut backend);
+ 390:     contract_handshake_known_peer_returns_none_initially(&mut backend);
+ 391:     contract_routes_replaced_deterministically(&mut backend);
+ 392:     contract_routes_cleared_on_empty_apply(&mut backend);
+ 393:     contract_exit_mode_off_is_default(&mut backend);
+ 394:     contract_exit_mode_full_tunnel_accepted(&mut backend);
+ 395:     contract_stats_peer_count_reflects_configured_peers(&mut backend);
+ 396:     contract_shutdown_then_ops_require_restart(&mut backend);
+ 397:     contract_multi_peer_isolated_operations(&mut backend);
+ 398:     contract_configure_same_peer_multiple_ips(&mut backend);
+ 399: }
+ 400: 
+ 401: // ── Named test functions ───
+ 402: 
+ 403: #[test]
+ 404: fn stub_backend_requires_running_state_for_mutations() {
+ 405:     let mut b = StubBackend::default();
+ 406:     contract_not_running_rejects_mutations(&mut b);
+ 407: }
+ 408: 
+ 409: #[test]
+ 410: fn stub_backend_rejects_double_start_and_resets_on_shutdown() {
+ 411:     let mut b = StubBackend::default();
+ 412:     contract_start_is_idempotent_reject(&mut b);
+ 413: }
+ 414: 
+ 415: #[test]
+ 416: fn stub_backend_start_and_shutdown_lifecycle() {
+ 417:     let mut b = StubBackend::default();
+ 418:     contract_start_and_shutdown_lifecycle(&mut b);
+ 419: }
+ 420: 
+ 421: #[test]
+ 422: fn stub_backend_configure_peer_round_trip() {
+ 423:     let mut b = StubBackend::default();
+ 424:     contract_configure_peer_round_trip(&mut b);
+ 425: }
+ 426: 
+ 427: #[test]
+ 428: fn stub_backend_configure_peer_replaces_existing() {
+ 429:     let mut b = StubBackend::default();
+ 430:     contract_configure_peer_replaces_existing(&mut b);
+ 431: }
+ 432: 
+ 433: #[test]
+ 434: fn stub_backend_remove_peer_makes_it_absent() {
+ 435:     let mut b = StubBackend::default();
+ 436:     contract_remove_peer_makes_it_absent(&mut b);
+ 437: }
+ 438: 
+ 439: #[test]
+ 440: fn stub_backend_update_endpoint_preserves_peer_identity() {
+ 441:     let mut b = StubBackend::default();
+ 442:     contract_update_endpoint_preserves_allowed_ips(&mut b);
+ 443: }
+ 444: 
+ 445: #[test]
+ 446: fn stub_backend_update_endpoint_unknown_peer_rejected() {
+ 447:     let mut b = StubBackend::default();
+ 448:     contract_update_endpoint_unknown_peer_rejected(&mut b);
+ 449: }
+ 450: 
+ 451: #[test]
+ 452: fn stub_backend_current_endpoint_unknown_peer_safe() {
+ 453:     let mut b = StubBackend::default();
+ 454:     contract_endpoint_unknown_peer_returns_none_or_error(&mut b);
+ 455: }
+ 456: 
+ 457: #[test]
+ 458: fn stub_backend_handshake_unknown_peer_rejected() {
+ 459:     let mut b = StubBackend::default();
+ 460:     contract_handshake_unknown_peer_rejected(&mut b);
+ 461: }
+ 462: 
+ 463: #[test]
+ 464: fn stub_backend_handshake_known_peer_returns_none_initially() {
+ 465:     let mut b = StubBackend::default();
+ 466:     contract_handshake_known_peer_returns_none_initially(&mut b);
+ 467: }
+ 468: 
+ 469: #[test]
+ 470: fn stub_backend_replaces_route_set_deterministically() {
+ 471:     let mut b = StubBackend::default();
+ 472:     contract_routes_replaced_deterministically(&mut b);
+ 473: }
+ 474: 
+ 475: #[test]
+ 476: fn stub_backend_routes_cleared_on_empty_apply() {
+ 477:     let mut b = StubBackend::default();
+ 478:     contract_routes_cleared_on_empty_apply(&mut b);
+ 479: }
+ 480: 
+ 481: #[test]
+ 482: fn stub_backend_exit_mode_off_is_default() {
+ 483:     let mut b = StubBackend::default();
+ 484:     contract_exit_mode_off_is_default(&mut b);
+ 485: }
+ 486: 
+ 487: #[test]
+ 488: fn stub_backend_exit_mode_full_tunnel_accepted() {
+ 489:     let mut b = StubBackend::default();
+ 490:     contract_exit_mode_full_tunnel_accepted(&mut b);
+ 491: }
+ 492: 
+ 493: #[test]
+ 494: fn stub_backend_stats_peer_count_reflects_configured_peers() {
+ 495:     let mut b = StubBackend::default();
+ 496:     contract_stats_peer_count_reflects_configured_peers(&mut b);
+ 497: }
+ 498: 
+ 499: #[test]
+ 500: fn stub_backend_shutdown_then_ops_require_restart() {
+ 501:     let mut b = StubBackend::default();
+ 502:     contract_shutdown_then_ops_require_restart(&mut b);
+ 503: }
+ 504: 
+ 505: #[test]
+ 506: fn stub_backend_multi_peer_isolated_operations() {
+ 507:     let mut b = StubBackend::default();
+ 508:     contract_multi_peer_isolated_operations(&mut b);
+ 509: }
+ 510: 
+ 511: #[test]
+ 512: fn stub_backend_configure_same_peer_with_multiple_allowed_ips() {
+ 513:     let mut b = StubBackend::default();
+ 514:     contract_configure_same_peer_multiple_ips(&mut b);
+ 515: }
+ 516: 
+ 517: #[test]
+ 518: fn stub_backend_passes_full_conformance_suite() {
+ 519:     run_stub_conformance_suite(StubBackend::default());
+ 520: }
+

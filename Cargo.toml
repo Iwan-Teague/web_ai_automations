@@ -1,0 +1,75 @@
+[package]
+name        = "web_ai_automation"
+version     = "0.1.0"
+edition     = "2024"
+default-run = "web_ai_automation"
+
+[dependencies]
+
+# ── Image comparison ─────────────────────────────────────────────
+image       = "0.25"         # PNG load/save (io.rs only)
+rayon       = "1.10"         # parallelism (compare.rs only)
+screenshots = "0.8"          # screen capture; supports macOS, Linux, Windows
+
+# ── Input simulation (cross-platform) ────────────────────────────
+enigo       = "0.1"          # mouse + keyboard (mac/win/linux)
+arboard     = "3"            # cross-platform clipboard reader/writer
+
+# ── Serialisation ────────────────────────────────────────────────
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"            # human-readable config and session files
+bincode     = "2"            # fast binary format for thumbnail matrices
+
+# ── GUI ──────────────────────────────────────────────────────────
+eframe      = "0.24"         # immediate-mode GUI (gui.rs only)
+rfd         = "0.13"         # native file picker dialogs
+
+# ── Bot / timing ─────────────────────────────────────────────────
+rand        = "0.8"
+chrono      = "0.4"
+tokio       = { version = "1", features = ["rt-multi-thread", "macros"] }
+reqwest     = { version = "0.12", features = ["json", "blocking"] }
+
+# ── Discord ──────────────────────────────────────────────────────
+serenity    = { version = "0.12", default-features = false,
+                features = ["client", "gateway", "model", "rustls_backend"] }
+
+# ── Utilities ────────────────────────────────────────────────────
+colored         = "2.1"
+crossterm       = "0.26"
+crossbeam-channel = "0.5"
+once_cell       = "1.19"
+futures         = "0.3"
+
+# ── Windows-only system APIs ─────────────────────────────────────
+# Used for foreground-window inspection and cursor position. Mac uses
+# the equivalent AppleScript/Cocoa paths via std::process::Command.
+[target.'cfg(windows)'.dependencies]
+winapi      = { version = "0.3", features = ["winuser", "windef"] }
+windows     = "0.51"
+
+[dev-dependencies]
+# Tests for pure modules run on any platform.
+
+# Diagnostic binary that proves mouse control works on the host. Run with
+#   cargo run --bin test_mouse
+# On macOS the OS will prompt for Accessibility permission the first time
+# (System Settings → Privacy & Security → Accessibility).
+[[bin]]
+name = "test_mouse"
+path = "src/bin/test_mouse.rs"
+
+# Capture a screen region and save it as a template PNG. Run with
+#   cargo run --bin capture_template -- <name> <x1> <y1> <x2> <y2>
+# Self-tests the saved file by re-capturing and matching against itself.
+[[bin]]
+name = "capture_template"
+path = "src/bin/capture_template.rs"
+
+[[bin]]
+name = "matrix_to_png"
+path = "src/bin/matrix_to_png.rs"
+
+[[bin]]
+name = "commit_scheduler"
+path = "src/bin/commit_scheduler.rs"
