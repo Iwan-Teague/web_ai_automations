@@ -1,0 +1,430 @@
+# Rust Project Map — rustynet-local-security
+
+Root: /Users/iwan/Desktop/Rustynet
+Captured: 2026-05-06T15:06:09+01:00
+Git: branch `main` @ 8a9c3eab12fe  ·  uncommitted files: 0
+Files: 2  ·  Lines of source: 392
+
+## Crate Dependencies (within this workspace)
+
+Depends on (workspace): (none)
+Depended on by (workspace): rustynet-cli, rustynetd
+
+## Public API Surface
+
+2 public items across 1 file(s).
+
+/crates/rustynet-local-security/src/lib.rs
+  L  113  pub fn validate_owner_only_socket(
+  L  208  pub fn validate_root_managed_shared_runtime_socket(
+
+
+## Document Tree
+
+`-- crates
+    `-- rustynet-local-security
+        |-- Cargo.toml  (8 lines)
+        `-- src
+            `-- lib.rs  (384 lines)
+
+
+## Files
+
+===== /crates/rustynet-local-security/src/lib.rs =====
+
+   1: #![forbid(unsafe_code)]
+   2: 
+   3: use std::fs;
+   4: use std::path::Path;
+   5: 
+   6: #[cfg(unix)]
+   7: use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+   8: 
+   9: #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+  10: struct SocketSecurityFacts {
+  11:     socket_mode: u32,
+  12:     socket_uid: u32,
+  13:     socket_gid: u32,
+  14:     parent_mode: u32,
+  15:     parent_uid: u32,
+  16:     parent_gid: u32,
+  17: }
+  18: 
+  19: #[cfg(unix)]
+  20: fn validate_socket_basics(path: &Path, label: &str) -> Result<fs::Metadata, String> {
+  21:     if !path.is_absolute() {
+  22:         return Err(format!("{label} path must be absolute: {}", path.display()));
+  23:     }
+  24:     let metadata = fs::symlink_metadata(path)
+  25:         .map_err(|err| format!("inspect {label} failed ({}): {err}", path.display()))?;
+  26:     if metadata.file_type().is_symlink() {
+  27:         return Err(format!("{label} must not be a symlink: {}", path.display()));
+  28:     }
+  29:     if !metadata.file_type().is_socket() {
+  30:         return Err(format!("{label} must be a Unix socket: {}", path.display()));
+  31:     }
+  32:     Ok(metadata)
+  33: }
+  34: 
+  35: #[cfg(unix)]
+  36: fn validate_parent_basics(path: &Path, label: &str) -> Result<fs::Metadata, String> {
+  37:     let parent = path.parent().ok_or_else(|| {
+  38:         format!(
+  39:             "{label} path must include a parent directory: {}",
+  40:             path.display()
+  41:         )
+  42:     })?;
+  43:     let metadata = fs::symlink_metadata(parent).map_err(|err| {
+  44:         format!(
+  45:             "{label} parent directory metadata read failed for {}: {err}",
+  46:             parent.display()
+  47:         )
+  48:     })?;
+  49:     if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+  50:         return Err(format!(
+  51:             "{label} parent directory must be a non-symlink directory: {}",
+  52:             parent.display()
+  53:         ));
+  54:     }
+  55:     Ok(metadata)
+  56: }
+  57: 
+  58: fn owner_allowed(owner_uid: u32, allowed_owner_uids: &[u32]) -> bool {
+  59:     allowed_owner_uids.contains(&owner_uid)
+  60: }
+  61: 
+  62: #[cfg(unix)]
+  63: fn inspect_socket_security_facts(path: &Path, label: &str) -> Result<SocketSecurityFacts, String> {
+  64:     let socket = validate_socket_basics(path, label)?;
+  65:     let parent = validate_parent_basics(path, label)?;
+  66:     Ok(SocketSecurityFacts {
+  67:         socket_mode: socket.permissions().mode() & 0o777,
+  68:         socket_uid: socket.uid(),
+  69:         socket_gid: socket.gid(),
+  70:         parent_mode: parent.permissions().mode() & 0o777,
+  71:         parent_uid: parent.uid(),
+  72:         parent_gid: parent.gid(),
+  73:     })
+  74: }
+  75: 
+  76: fn validate_owner_only_socket_facts(
+  77:     path: &Path,
+  78:     label: &str,
+  79:     facts: SocketSecurityFacts,
+  80:     allowed_socket_owner_uids: &[u32],
+  81:     allowed_parent_owner_uids: &[u32],
+  82: ) -> Result<(), String> {
+  83:     if facts.socket_mode & 0o077 != 0 {
+  84:         return Err(format!(
+  85:             "{label} permissions too broad ({:03o}); expected owner-only socket permissions: {}",
+  86:             facts.socket_mode,
+  87:             path.display()
+  88:         ));
+  89:     }
+  90:     if !owner_allowed(facts.socket_uid, allowed_socket_owner_uids) {
+  91:         return Err(format!(
+  92:             "{label} owner uid mismatch: allowed {:?}, found {} ({})",
+  93:             allowed_socket_owner_uids,
+  94:             facts.socket_uid,
+  95:             path.display()
+  96:         ));
+  97:     }
+  98:     if facts.parent_mode & 0o022 != 0 {
+  99:         return Err(format!(
+ 100:             "{label} parent directory has insecure permissions: mode {:o}",
+ 101:             facts.parent_mode
+ 102:         ));
+ 103:     }
+ 104:     if !owner_allowed(facts.parent_uid, allowed_parent_owner_uids) {
+ 105:         return Err(format!(
+ 106:             "{label} parent directory owner uid mismatch: allowed {allowed_parent_owner_uids:?}, found {}",
+ 107:             facts.parent_uid,
+ 108:         ));
+ 109:     }
+ 110:     Ok(())
+ 111: }
+ 112: 
+ 113: pub fn validate_owner_only_socket(
+ 114:     path: &Path,
+ 115:     label: &str,
+ 116:     allowed_socket_owner_uids: &[u32],
+ 117:     allowed_parent_owner_uids: &[u32],
+ 118: ) -> Result<(), String> {
+ 119:     #[cfg(not(unix))]
+ 120:     {
+ 121:         let _ = (
+ 122:             path,
+ 123:             label,
+ 124:             allowed_socket_owner_uids,
+ 125:             allowed_parent_owner_uids,
+ 126:         );
+ 127:         return Err(
+ 128:             "owner-only socket validation is available only on Unix sockets; Windows must use named-pipe IPC validation"
+ 129:                 .to_string(),
+ 130:         );
+ 131:     }
+ 132: 
+ 133:     #[cfg(unix)]
+ 134:     {
+ 135:         let facts = inspect_socket_security_facts(path, label)?;
+ 136:         validate_owner_only_socket_facts(
+ 137:             path,
+ 138:             label,
+ 139:             facts,
+ 140:             allowed_socket_owner_uids,
+ 141:             allowed_parent_owner_uids,
+ 142:         )
+ 143:     }
+ 144: }
+ 145: 
+ 146: fn validate_root_managed_shared_runtime_socket_facts(
+ 147:     path: &Path,
+ 148:     label: &str,
+ 149:     facts: SocketSecurityFacts,
+ 150:     allowed_socket_owner_uids: &[u32],
+ 151:     allowed_parent_owner_uids: &[u32],
+ 152:     expected_gid: u32,
+ 153: ) -> Result<(), String> {
+ 154:     if facts.socket_mode & 0o007 != 0 {
+ 155:         return Err(format!(
+ 156:             "{label} permissions too broad ({:03o}); world access is forbidden: {}",
+ 157:             facts.socket_mode,
+ 158:             path.display()
+ 159:         ));
+ 160:     }
+ 161:     let root_managed_group_socket =
+ 162:         facts.socket_uid == 0 && facts.socket_gid == expected_gid && facts.socket_mode == 0o660;
+ 163:     if !owner_allowed(facts.socket_uid, allowed_socket_owner_uids) && !root_managed_group_socket {
+ 164:         return Err(format!(
+ 165:             "{label} owner uid mismatch: allowed {:?}, found {} ({})",
+ 166:             allowed_socket_owner_uids,
+ 167:             facts.socket_uid,
+ 168:             path.display()
+ 169:         ));
+ 170:     }
+ 171:     if facts.socket_mode & 0o070 != 0
+ 172:         && !root_managed_group_socket
+ 173:         && facts.socket_gid != expected_gid
+ 174:     {
+ 175:         return Err(format!(
+ 176:             "{label} group mismatch: expected gid {expected_gid}, found {} ({})",
+ 177:             facts.socket_gid,
+ 178:             path.display()
+ 179:         ));
+ 180:     }
+ 181: 
+ 182:     if facts.parent_mode & 0o002 != 0 {
+ 183:         return Err(format!(
+ 184:             "{label} parent directory has insecure permissions: mode {:o}",
+ 185:             facts.parent_mode
+ 186:         ));
+ 187:     }
+ 188:     let root_managed_shared_runtime =
+ 189:         facts.parent_uid == 0 && facts.parent_gid == expected_gid && facts.parent_mode == 0o770;
+ 190:     if !owner_allowed(facts.parent_uid, allowed_parent_owner_uids) && !root_managed_shared_runtime {
+ 191:         return Err(format!(
+ 192:             "{label} parent directory owner uid mismatch: allowed {allowed_parent_owner_uids:?}, found {}",
+ 193:             facts.parent_uid,
+ 194:         ));
+ 195:     }
+ 196:     if facts.parent_mode & 0o020 != 0
+ 197:         && !root_managed_shared_runtime
+ 198:         && facts.parent_gid != expected_gid
+ 199:     {
+ 200:         return Err(format!(
+ 201:             "{label} parent directory group mismatch: expected gid {expected_gid}, found {}",
+ 202:             facts.parent_gid
+ 203:         ));
+ 204:     }
+ 205:     Ok(())
+ 206: }
+ 207: 
+ 208: pub fn validate_root_managed_shared_runtime_socket(
+ 209:     path: &Path,
+ 210:     label: &str,
+ 211:     allowed_socket_owner_uids: &[u32],
+ 212:     allowed_parent_owner_uids: &[u32],
+ 213:     expected_gid: u32,
+ 214: ) -> Result<(), String> {
+ 215:     #[cfg(not(unix))]
+ 216:     {
+ 217:         let _ = (
+ 218:             path,
+ 219:             label,
+ 220:             allowed_socket_owner_uids,
+ 221:             allowed_parent_owner_uids,
+ 222:             expected_gid,
+ 223:         );
+ 224:         return Err(
+ 225:             "root-managed shared runtime socket validation is available only on Unix sockets; Windows must use named-pipe IPC validation"
+ 226:                 .to_string(),
+ 227:         );
+ 228:     }
+ 229: 
+ 230:     #[cfg(unix)]
+ 231:     {
+ 232:         let facts = inspect_socket_security_facts(path, label)?;
+ 233:         validate_root_managed_shared_runtime_socket_facts(
+ 234:             path,
+ 235:             label,
+ 236:             facts,
+ 237:             allowed_socket_owner_uids,
+ 238:             allowed_parent_owner_uids,
+ 239:             expected_gid,
+ 240:         )
+ 241:     }
+ 242: }
+ 243: 
+ 244: #[cfg(all(test, unix))]
+ 245: mod tests {
+ 246:     use super::{
+ 247:         SocketSecurityFacts, validate_owner_only_socket, validate_owner_only_socket_facts,
+ 248:         validate_root_managed_shared_runtime_socket_facts,
+ 249:     };
+ 250:     use std::os::unix::fs::{PermissionsExt, symlink};
+ 251:     use std::path::{Path, PathBuf};
+ 252:     use std::time::{SystemTime, UNIX_EPOCH};
+ 253: 
+ 254:     fn unique_dir(prefix: &str) -> PathBuf {
+ 255:         let unique = format!(
+ 256:             "{prefix}-{}",
+ 257:             SystemTime::now()
+ 258:                 .duration_since(UNIX_EPOCH)
+ 259:                 .expect("clock should be valid")
+ 260:                 .as_nanos()
+ 261:         );
+ 262:         PathBuf::from("/tmp").join(unique)
+ 263:     }
+ 264: 
+ 265:     #[test]
+ 266:     fn owner_only_socket_facts_accept_owner_only_socket() {
+ 267:         let path = Path::new("/tmp/rustynetd.sock");
+ 268:         let facts = SocketSecurityFacts {
+ 269:             socket_mode: 0o600,
+ 270:             socket_uid: 501,
+ 271:             socket_gid: 20,
+ 272:             parent_mode: 0o700,
+ 273:             parent_uid: 501,
+ 274:             parent_gid: 20,
+ 275:         };
+ 276: 
+ 277:         let result = validate_owner_only_socket_facts(path, "daemon socket", facts, &[501], &[501]);
+ 278:         assert!(result.is_ok(), "owner-only socket should validate");
+ 279:     }
+ 280: 
+ 281:     #[test]
+ 282:     fn owner_only_socket_facts_reject_group_writable_parent_directory() {
+ 283:         let path = Path::new("/tmp/rustynetd.sock");
+ 284:         let facts = SocketSecurityFacts {
+ 285:             socket_mode: 0o600,
+ 286:             socket_uid: 501,
+ 287:             socket_gid: 20,
+ 288:             parent_mode: 0o770,
+ 289:             parent_uid: 501,
+ 290:             parent_gid: 20,
+ 291:         };
+ 292: 
+ 293:         let err = validate_owner_only_socket_facts(path, "daemon socket", facts, &[501], &[501])
+ 294:             .expect_err("group-writable parent must fail");
+ 295:         assert!(err.contains("parent directory has insecure permissions"));
+ 296:     }
+ 297: 
+ 298:     #[test]
+ 299:     fn owner_only_socket_validator_rejects_symlink_socket_path() {
+ 300:         let dir = unique_dir("rn-local-sec-link");
+ 301:         std::fs::create_dir_all(&dir).expect("test dir should exist");
+ 302:         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+ 303:             .expect("test dir permissions should be strict");
+ 304:         let socket = dir.join("rustynetd.sock.target");
+ 305:         let symlink_path = dir.join("rustynetd.sock.link");
+ 306:         std::fs::write(&socket, b"not-a-socket").expect("target file should exist");
+ 307:         symlink(&socket, &symlink_path).expect("symlink should be created");
+ 308: 
+ 309:         let err = validate_owner_only_socket(&symlink_path, "daemon socket", &[501], &[501])
+ 310:             .expect_err("symlink socket path must fail");
+ 311:         assert!(err.contains("must not be a symlink"));
+ 312:         let _ = std::fs::remove_dir_all(dir);
+ 313:     }
+ 314: 
+ 315:     #[test]
+ 316:     fn shared_runtime_socket_facts_accept_owner_only_socket() {
+ 317:         let path = Path::new("/run/rustynet/helper.sock");
+ 318:         let facts = SocketSecurityFacts {
+ 319:             socket_mode: 0o600,
+ 320:             socket_uid: 501,
+ 321:             socket_gid: 20,
+ 322:             parent_mode: 0o700,
+ 323:             parent_uid: 501,
+ 324:             parent_gid: 20,
+ 325:         };
+ 326: 
+ 327:         let result = validate_root_managed_shared_runtime_socket_facts(
+ 328:             path,
+ 329:             "privileged helper socket",
+ 330:             facts,
+ 331:             &[501],
+ 332:             &[501],
+ 333:             20,
+ 334:         );
+ 335:         assert!(
+ 336:             result.is_ok(),
+ 337:             "owner-only helper socket should validate under shared-runtime policy"
+ 338:         );
+ 339:     }
+ 340: 
+ 341:     #[test]
+ 342:     fn shared_runtime_socket_validator_accepts_root_managed_group_socket_facts() {
+ 343:         let path = Path::new("/run/rustynet/helper.sock");
+ 344:         let facts = SocketSecurityFacts {
+ 345:             socket_mode: 0o660,
+ 346:             socket_uid: 0,
+ 347:             socket_gid: 998,
+ 348:             parent_mode: 0o770,
+ 349:             parent_uid: 0,
+ 350:             parent_gid: 998,
+ 351:         };
+ 352: 
+ 353:         let result = validate_root_managed_shared_runtime_socket_facts(
+ 354:             path,
+ 355:             "privileged helper socket",
+ 356:             facts,
+ 357:             &[501],
+ 358:             &[501],
+ 359:             998,
+ 360:         );
+ 361:         assert!(
+ 362:             result.is_ok(),
+ 363:             "root-managed shared-runtime socket should validate"
+ 364:         );
+ 365:     }
+ 366: 
+ 367:     #[test]
+ 368:     fn owner_only_socket_validator_rejects_regular_file_path() {
+ 369:         let dir = unique_dir("rn-local-sec-regular");
+ 370:         std::fs::create_dir_all(&dir).expect("test dir should exist");
+ 371:         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+ 372:             .expect("test dir permissions should be strict");
+ 373:         let path = dir.join("rustynetd.sock");
+ 374:         std::fs::write(&path, b"not-a-socket").expect("regular file should exist");
+ 375:         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+ 376:             .expect("regular file permissions should be owner-only");
+ 377: 
+ 378:         let err = validate_owner_only_socket(&path, "daemon socket", &[501], &[501])
+ 379:             .expect_err("regular file path must fail");
+ 380:         assert!(err.contains("must be a Unix socket"));
+ 381: 
+ 382:         let _ = std::fs::remove_dir_all(dir);
+ 383:     }
+ 384: }
+
+===== /crates/rustynet-local-security/Cargo.toml =====
+
+   1: [package]
+   2: name = "rustynet-local-security"
+   3: version.workspace = true
+   4: edition.workspace = true
+   5: license.workspace = true
+   6: authors.workspace = true
+   7: 
+   8: [dependencies]
+
