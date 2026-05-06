@@ -1,0 +1,715 @@
+# Rust Project Map — rustynet-policy
+
+Root: /Users/iwan/Desktop/Rustynet
+Captured: 2026-05-06T15:06:09+01:00
+Git: branch `main` @ 8a9c3eab12fe  ·  uncommitted files: 0
+Files: 3  ·  Lines of source: 650
+
+## Crate Dependencies (within this workspace)
+
+Depends on (workspace): (none)
+Depended on by (workspace): rustynet-cli, rustynet-control, rustynetd
+
+## Public API Surface
+
+25 public items across 1 file(s).
+
+/crates/rustynet-policy/src/lib.rs
+  L    6  pub enum Protocol
+  L   14  pub enum TrafficContext
+  L   21  pub enum RuleAction
+  L   27  pub struct PolicyRule
+  L   35  pub struct AccessRequest
+  L   42  pub struct ContextualAccessRequest
+  L   50  pub enum Decision
+  L   56  pub enum MembershipStatus
+  L   63  pub struct MembershipDirectory
+  L   68  pub fn set_node_status(&mut self, node_id: impl Into<String>, status: MembershipStatus)
+  L   72  pub fn node_status(&self, node_id: &str) -> MembershipStatus
+  L   83  pub fn is_populated(&self) -> bool
+  L   89  pub struct PolicySet
+  L   94  pub fn evaluate(&self, request: &AccessRequest) -> Decision
+  L  115  pub fn evaluate_with_membership(
+  L  149  pub struct ContextualPolicyRule
+  L  158  pub struct ContextualPolicySet
+  L  163  pub fn evaluate(&self, request: &ContextualAccessRequest) -> Decision
+  L  187  pub fn evaluate_with_membership(
+  L  224  pub enum RolloutError
+  L  230  pub struct PolicyRolloutController
+  L  237  pub fn stage_revision(
+  L  248  pub fn promote_canary(&mut self) -> Result<(), RolloutError>
+  L  257  pub fn rollback_to(&mut self, revision_id: &str) -> Result<(), RolloutError>
+  L  266  pub fn active_revision(&self) -> Option<&str>
+
+
+## Document Tree
+
+`-- crates
+    `-- rustynet-policy
+        |-- .gitignore  (1 lines)
+        |-- Cargo.toml  (8 lines)
+        `-- src
+            `-- lib.rs  (641 lines)
+
+
+## Files
+
+===== /crates/rustynet-policy/src/lib.rs =====
+
+   1: #![forbid(unsafe_code)]
+   2: 
+   3: use std::collections::HashMap;
+   4: 
+   5: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+   6: pub enum Protocol {
+   7:     Any,
+   8:     Tcp,
+   9:     Udp,
+  10:     Icmp,
+  11: }
+  12: 
+  13: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  14: pub enum TrafficContext {
+  15:     Mesh,
+  16:     SharedSubnetRouter,
+  17:     SharedExit,
+  18: }
+  19: 
+  20: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  21: pub enum RuleAction {
+  22:     Allow,
+  23:     Deny,
+  24: }
+  25: 
+  26: #[derive(Debug, Clone, PartialEq, Eq)]
+  27: pub struct PolicyRule {
+  28:     pub src: String,
+  29:     pub dst: String,
+  30:     pub protocol: Protocol,
+  31:     pub action: RuleAction,
+  32: }
+  33: 
+  34: #[derive(Debug, Clone, PartialEq, Eq)]
+  35: pub struct AccessRequest {
+  36:     pub src: String,
+  37:     pub dst: String,
+  38:     pub protocol: Protocol,
+  39: }
+  40: 
+  41: #[derive(Debug, Clone, PartialEq, Eq)]
+  42: pub struct ContextualAccessRequest {
+  43:     pub src: String,
+  44:     pub dst: String,
+  45:     pub protocol: Protocol,
+  46:     pub context: TrafficContext,
+  47: }
+  48: 
+  49: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  50: pub enum Decision {
+  51:     Allow,
+  52:     Deny,
+  53: }
+  54: 
+  55: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  56: pub enum MembershipStatus {
+  57:     Active,
+  58:     Revoked,
+  59:     Unknown,
+  60: }
+  61: 
+  62: #[derive(Debug, Clone, Default)]
+  63: pub struct MembershipDirectory {
+  64:     nodes: HashMap<String, MembershipStatus>,
+  65: }
+  66: 
+  67: impl MembershipDirectory {
+  68:     pub fn set_node_status(&mut self, node_id: impl Into<String>, status: MembershipStatus) {
+  69:         self.nodes.insert(node_id.into(), status);
+  70:     }
+  71: 
+  72:     pub fn node_status(&self, node_id: &str) -> MembershipStatus {
+  73:         self.nodes
+  74:             .get(node_id)
+  75:             .copied()
+  76:             .unwrap_or(MembershipStatus::Unknown)
+  77:     }
+  78: 
+  79:     /// Returns `true` if at least one node has been registered in this
+  80:     /// directory.  When the directory is unpopulated (empty) the membership
+  81:     /// enforcement gate treats nodes as pre-membership and skips the check so
+  82:     /// that deployments that have not yet adopted governance are not broken.
+  83:     pub fn is_populated(&self) -> bool {
+  84:         !self.nodes.is_empty()
+  85:     }
+  86: }
+  87: 
+  88: #[derive(Debug, Clone, Default)]
+  89: pub struct PolicySet {
+  90:     pub rules: Vec<PolicyRule>,
+  91: }
+  92: 
+  93: impl PolicySet {
+  94:     pub fn evaluate(&self, request: &AccessRequest) -> Decision {
+  95:         for rule in &self.rules {
+  96:             if !selector_matches(&rule.src, &request.src) {
+  97:                 continue;
+  98:             }
+  99:             if !selector_matches(&rule.dst, &request.dst) {
+ 100:                 continue;
+ 101:             }
+ 102:             if rule.protocol != Protocol::Any && rule.protocol != request.protocol {
+ 103:                 continue;
+ 104:             }
+ 105: 
+ 106:             return match rule.action {
+ 107:                 RuleAction::Allow => Decision::Allow,
+ 108:                 RuleAction::Deny => Decision::Deny,
+ 109:             };
+ 110:         }
+ 111: 
+ 112:         Decision::Deny
+ 113:     }
+ 114: 
+ 115:     pub fn evaluate_with_membership(
+ 116:         &self,
+ 117:         request: &AccessRequest,
+ 118:         membership: &MembershipDirectory,
+ 119:     ) -> Decision {
+ 120:         if !membership_request_allowed(request.src.as_str(), request.dst.as_str(), membership) {
+ 121:             return Decision::Deny;
+ 122:         }
+ 123: 
+ 124:         for rule in &self.rules {
+ 125:             if !membership_rule_allowed(rule.src.as_str(), rule.dst.as_str(), membership) {
+ 126:                 continue;
+ 127:             }
+ 128:             if !selector_matches(&rule.src, &request.src) {
+ 129:                 continue;
+ 130:             }
+ 131:             if !selector_matches(&rule.dst, &request.dst) {
+ 132:                 continue;
+ 133:             }
+ 134:             if rule.protocol != Protocol::Any && rule.protocol != request.protocol {
+ 135:                 continue;
+ 136:             }
+ 137: 
+ 138:             return match rule.action {
+ 139:                 RuleAction::Allow => Decision::Allow,
+ 140:                 RuleAction::Deny => Decision::Deny,
+ 141:             };
+ 142:         }
+ 143: 
+ 144:         Decision::Deny
+ 145:     }
+ 146: }
+ 147: 
+ 148: #[derive(Debug, Clone, PartialEq, Eq)]
+ 149: pub struct ContextualPolicyRule {
+ 150:     pub src: String,
+ 151:     pub dst: String,
+ 152:     pub protocol: Protocol,
+ 153:     pub action: RuleAction,
+ 154:     pub contexts: Vec<TrafficContext>,
+ 155: }
+ 156: 
+ 157: #[derive(Debug, Clone, Default)]
+ 158: pub struct ContextualPolicySet {
+ 159:     pub rules: Vec<ContextualPolicyRule>,
+ 160: }
+ 161: 
+ 162: impl ContextualPolicySet {
+ 163:     pub fn evaluate(&self, request: &ContextualAccessRequest) -> Decision {
+ 164:         for rule in &self.rules {
+ 165:             if !selector_matches(&rule.src, &request.src) {
+ 166:                 continue;
+ 167:             }
+ 168:             if !selector_matches(&rule.dst, &request.dst) {
+ 169:                 continue;
+ 170:             }
+ 171:             if rule.protocol != Protocol::Any && rule.protocol != request.protocol {
+ 172:                 continue;
+ 173:             }
+ 174:             if !context_matches(&rule.contexts, request.context) {
+ 175:                 continue;
+ 176:             }
+ 177: 
+ 178:             return match rule.action {
+ 179:                 RuleAction::Allow => Decision::Allow,
+ 180:                 RuleAction::Deny => Decision::Deny,
+ 181:             };
+ 182:         }
+ 183: 
+ 184:         Decision::Deny
+ 185:     }
+ 186: 
+ 187:     pub fn evaluate_with_membership(
+ 188:         &self,
+ 189:         request: &ContextualAccessRequest,
+ 190:         membership: &MembershipDirectory,
+ 191:     ) -> Decision {
+ 192:         if !membership_request_allowed(request.src.as_str(), request.dst.as_str(), membership) {
+ 193:             return Decision::Deny;
+ 194:         }
+ 195: 
+ 196:         for rule in &self.rules {
+ 197:             if !membership_rule_allowed(rule.src.as_str(), rule.dst.as_str(), membership) {
+ 198:                 continue;
+ 199:             }
+ 200:             if !selector_matches(&rule.src, &request.src) {
+ 201:                 continue;
+ 202:             }
+ 203:             if !selector_matches(&rule.dst, &request.dst) {
+ 204:                 continue;
+ 205:             }
+ 206:             if rule.protocol != Protocol::Any && rule.protocol != request.protocol {
+ 207:                 continue;
+ 208:             }
+ 209:             if !context_matches(&rule.contexts, request.context) {
+ 210:                 continue;
+ 211:             }
+ 212: 
+ 213:             return match rule.action {
+ 214:                 RuleAction::Allow => Decision::Allow,
+ 215:                 RuleAction::Deny => Decision::Deny,
+ 216:             };
+ 217:         }
+ 218: 
+ 219:         Decision::Deny
+ 220:     }
+ 221: }
+ 222: 
+ 223: #[derive(Debug, Clone, PartialEq, Eq)]
+ 224: pub enum RolloutError {
+ 225:     UnsafeAllowAll,
+ 226:     UnknownRevision,
+ 227: }
+ 228: 
+ 229: #[derive(Debug, Clone, Default)]
+ 230: pub struct PolicyRolloutController {
+ 231:     revisions: HashMap<String, ContextualPolicySet>,
+ 232:     active_revision: Option<String>,
+ 233:     canary_revision: Option<String>,
+ 234: }
+ 235: 
+ 236: impl PolicyRolloutController {
+ 237:     pub fn stage_revision(
+ 238:         &mut self,
+ 239:         revision_id: String,
+ 240:         policy: ContextualPolicySet,
+ 241:     ) -> Result<(), RolloutError> {
+ 242:         validate_policy_safety(&policy)?;
+ 243:         self.revisions.insert(revision_id.clone(), policy);
+ 244:         self.canary_revision = Some(revision_id);
+ 245:         Ok(())
+ 246:     }
+ 247: 
+ 248:     pub fn promote_canary(&mut self) -> Result<(), RolloutError> {
+ 249:         let Some(canary) = self.canary_revision.clone() else {
+ 250:             return Err(RolloutError::UnknownRevision);
+ 251:         };
+ 252:         self.active_revision = Some(canary);
+ 253:         self.canary_revision = None;
+ 254:         Ok(())
+ 255:     }
+ 256: 
+ 257:     pub fn rollback_to(&mut self, revision_id: &str) -> Result<(), RolloutError> {
+ 258:         if !self.revisions.contains_key(revision_id) {
+ 259:             return Err(RolloutError::UnknownRevision);
+ 260:         }
+ 261:         self.active_revision = Some(revision_id.to_string());
+ 262:         self.canary_revision = None;
+ 263:         Ok(())
+ 264:     }
+ 265: 
+ 266:     pub fn active_revision(&self) -> Option<&str> {
+ 267:         self.active_revision.as_deref()
+ 268:     }
+ 269: }
+ 270: 
+ 271: fn validate_policy_safety(policy: &ContextualPolicySet) -> Result<(), RolloutError> {
+ 272:     let contains_allow_all = policy.rules.iter().any(|rule| {
+ 273:         rule.src == "*"
+ 274:             && rule.dst == "*"
+ 275:             && rule.protocol == Protocol::Any
+ 276:             && rule.action == RuleAction::Allow
+ 277:     });
+ 278:     if contains_allow_all {
+ 279:         return Err(RolloutError::UnsafeAllowAll);
+ 280:     }
+ 281:     Ok(())
+ 282: }
+ 283: 
+ 284: fn selector_matches(rule_value: &str, candidate: &str) -> bool {
+ 285:     rule_value == "*" || rule_value == candidate
+ 286: }
+ 287: 
+ 288: fn context_matches(allowed_contexts: &[TrafficContext], candidate: TrafficContext) -> bool {
+ 289:     allowed_contexts.is_empty() || allowed_contexts.contains(&candidate)
+ 290: }
+ 291: 
+ 292: fn membership_rule_allowed(
+ 293:     src_selector: &str,
+ 294:     dst_selector: &str,
+ 295:     membership: &MembershipDirectory,
+ 296: ) -> bool {
+ 297:     selector_membership_allowed(src_selector, membership)
+ 298:         && selector_membership_allowed(dst_selector, membership)
+ 299: }
+ 300: 
+ 301: fn membership_request_allowed(src: &str, dst: &str, membership: &MembershipDirectory) -> bool {
+ 302:     selector_membership_allowed(src, membership) && selector_membership_allowed(dst, membership)
+ 303: }
+ 304: 
+ 305: fn selector_membership_allowed(selector: &str, membership: &MembershipDirectory) -> bool {
+ 306:     let Some(node_id) = selector_node_id(selector) else {
+ 307:         return true;
+ 308:     };
+ 309:     membership.node_status(node_id) == MembershipStatus::Active
+ 310: }
+ 311: 
+ 312: fn selector_node_id(selector: &str) -> Option<&str> {
+ 313:     selector.strip_prefix("node:")
+ 314: }
+ 315: 
+ 316: #[cfg(test)]
+ 317: mod tests {
+ 318:     use super::{
+ 319:         AccessRequest, ContextualAccessRequest, ContextualPolicyRule, ContextualPolicySet,
+ 320:         Decision, MembershipDirectory, MembershipStatus, PolicyRolloutController, PolicyRule,
+ 321:         PolicySet, Protocol, RolloutError, RuleAction, TrafficContext,
+ 322:     };
+ 323: 
+ 324:     #[test]
+ 325:     fn policy_defaults_to_deny() {
+ 326:         let set = PolicySet::default();
+ 327:         let request = AccessRequest {
+ 328:             src: "group:family".to_string(),
+ 329:             dst: "tag:servers".to_string(),
+ 330:             protocol: Protocol::Tcp,
+ 331:         };
+ 332: 
+ 333:         assert_eq!(set.evaluate(&request), Decision::Deny);
+ 334:     }
+ 335: 
+ 336:     #[test]
+ 337:     fn policy_respects_first_match() {
+ 338:         let set = PolicySet {
+ 339:             rules: vec![
+ 340:                 PolicyRule {
+ 341:                     src: "group:family".to_string(),
+ 342:                     dst: "tag:servers".to_string(),
+ 343:                     protocol: Protocol::Tcp,
+ 344:                     action: RuleAction::Allow,
+ 345:                 },
+ 346:                 PolicyRule {
+ 347:                     src: "*".to_string(),
+ 348:                     dst: "*".to_string(),
+ 349:                     protocol: Protocol::Any,
+ 350:                     action: RuleAction::Deny,
+ 351:                 },
+ 352:             ],
+ 353:         };
+ 354: 
+ 355:         let request = AccessRequest {
+ 356:             src: "group:family".to_string(),
+ 357:             dst: "tag:servers".to_string(),
+ 358:             protocol: Protocol::Tcp,
+ 359:         };
+ 360: 
+ 361:         assert_eq!(set.evaluate(&request), Decision::Allow);
+ 362:     }
+ 363: 
+ 364:     #[test]
+ 365:     fn contextual_policy_defaults_to_deny_in_shared_contexts() {
+ 366:         let set = ContextualPolicySet::default();
+ 367:         let request = ContextualAccessRequest {
+ 368:             src: "group:family".to_string(),
+ 369:             dst: "tag:servers".to_string(),
+ 370:             protocol: Protocol::Tcp,
+ 371:             context: TrafficContext::SharedExit,
+ 372:         };
+ 373:         assert_eq!(set.evaluate(&request), Decision::Deny);
+ 374:     }
+ 375: 
+ 376:     #[test]
+ 377:     fn protocol_filter_is_preserved_for_shared_exit_context() {
+ 378:         let set = ContextualPolicySet {
+ 379:             rules: vec![
+ 380:                 ContextualPolicyRule {
+ 381:                     src: "group:family".to_string(),
+ 382:                     dst: "tag:servers".to_string(),
+ 383:                     protocol: Protocol::Tcp,
+ 384:                     action: RuleAction::Allow,
+ 385:                     contexts: vec![TrafficContext::SharedExit],
+ 386:                 },
+ 387:                 ContextualPolicyRule {
+ 388:                     src: "*".to_string(),
+ 389:                     dst: "*".to_string(),
+ 390:                     protocol: Protocol::Any,
+ 391:                     action: RuleAction::Deny,
+ 392:                     contexts: vec![
+ 393:                         TrafficContext::Mesh,
+ 394:                         TrafficContext::SharedSubnetRouter,
+ 395:                         TrafficContext::SharedExit,
+ 396:                     ],
+ 397:                 },
+ 398:             ],
+ 399:         };
+ 400: 
+ 401:         let tcp_request = ContextualAccessRequest {
+ 402:             src: "group:family".to_string(),
+ 403:             dst: "tag:servers".to_string(),
+ 404:             protocol: Protocol::Tcp,
+ 405:             context: TrafficContext::SharedExit,
+ 406:         };
+ 407:         let udp_request = ContextualAccessRequest {
+ 408:             src: "group:family".to_string(),
+ 409:             dst: "tag:servers".to_string(),
+ 410:             protocol: Protocol::Udp,
+ 411:             context: TrafficContext::SharedExit,
+ 412:         };
+ 413: 
+ 414:         assert_eq!(set.evaluate(&tcp_request), Decision::Allow);
+ 415:         assert_eq!(set.evaluate(&udp_request), Decision::Deny);
+ 416:     }
+ 417: 
+ 418:     #[test]
+ 419:     fn contextual_policy_does_not_widen_between_shared_router_and_exit() {
+ 420:         let set = ContextualPolicySet {
+ 421:             rules: vec![ContextualPolicyRule {
+ 422:                 src: "group:family".to_string(),
+ 423:                 dst: "tag:servers".to_string(),
+ 424:                 protocol: Protocol::Icmp,
+ 425:                 action: RuleAction::Allow,
+ 426:                 contexts: vec![TrafficContext::SharedSubnetRouter],
+ 427:             }],
+ 428:         };
+ 429: 
+ 430:         let router_request = ContextualAccessRequest {
+ 431:             src: "group:family".to_string(),
+ 432:             dst: "tag:servers".to_string(),
+ 433:             protocol: Protocol::Icmp,
+ 434:             context: TrafficContext::SharedSubnetRouter,
+ 435:         };
+ 436:         let exit_request = ContextualAccessRequest {
+ 437:             src: "group:family".to_string(),
+ 438:             dst: "tag:servers".to_string(),
+ 439:             protocol: Protocol::Icmp,
+ 440:             context: TrafficContext::SharedExit,
+ 441:         };
+ 442: 
+ 443:         assert_eq!(set.evaluate(&router_request), Decision::Allow);
+ 444:         assert_eq!(set.evaluate(&exit_request), Decision::Deny);
+ 445:     }
+ 446: 
+ 447:     #[test]
+ 448:     fn rollout_controller_rejects_allow_all_and_supports_rollback() {
+ 449:         let mut controller = PolicyRolloutController::default();
+ 450: 
+ 451:         let invalid_policy = ContextualPolicySet {
+ 452:             rules: vec![ContextualPolicyRule {
+ 453:                 src: "*".to_string(),
+ 454:                 dst: "*".to_string(),
+ 455:                 protocol: Protocol::Any,
+ 456:                 action: RuleAction::Allow,
+ 457:                 contexts: vec![
+ 458:                     TrafficContext::Mesh,
+ 459:                     TrafficContext::SharedSubnetRouter,
+ 460:                     TrafficContext::SharedExit,
+ 461:                 ],
+ 462:             }],
+ 463:         };
+ 464:         let rejected_result = controller.stage_revision("rev-blocked".to_string(), invalid_policy);
+ 465:         assert_eq!(rejected_result.err(), Some(RolloutError::UnsafeAllowAll));
+ 466: 
+ 467:         let safe_policy_v1 = ContextualPolicySet {
+ 468:             rules: vec![ContextualPolicyRule {
+ 469:                 src: "group:family".to_string(),
+ 470:                 dst: "tag:servers".to_string(),
+ 471:                 protocol: Protocol::Tcp,
+ 472:                 action: RuleAction::Allow,
+ 473:                 contexts: vec![TrafficContext::Mesh],
+ 474:             }],
+ 475:         };
+ 476:         controller
+ 477:             .stage_revision("rev-1".to_string(), safe_policy_v1)
+ 478:             .expect("safe revision should stage");
+ 479:         controller.promote_canary().expect("canary should promote");
+ 480:         assert_eq!(controller.active_revision(), Some("rev-1"));
+ 481: 
+ 482:         let safe_policy_v2 = ContextualPolicySet {
+ 483:             rules: vec![ContextualPolicyRule {
+ 484:                 src: "group:family".to_string(),
+ 485:                 dst: "tag:servers".to_string(),
+ 486:                 protocol: Protocol::Udp,
+ 487:                 action: RuleAction::Allow,
+ 488:                 contexts: vec![TrafficContext::Mesh],
+ 489:             }],
+ 490:         };
+ 491:         controller
+ 492:             .stage_revision("rev-2".to_string(), safe_policy_v2)
+ 493:             .expect("second safe revision should stage");
+ 494:         controller.promote_canary().expect("canary should promote");
+ 495:         assert_eq!(controller.active_revision(), Some("rev-2"));
+ 496: 
+ 497:         controller
+ 498:             .rollback_to("rev-1")
+ 499:             .expect("rollback should target known revision");
+ 500:         assert_eq!(controller.active_revision(), Some("rev-1"));
+ 501:     }
+ 502: 
+ 503:     #[test]
+ 504:     fn membership_aware_contextual_policy_denies_revoked_and_unknown_nodes() {
+ 505:         let set = ContextualPolicySet {
+ 506:             rules: vec![ContextualPolicyRule {
+ 507:                 src: "user:local".to_string(),
+ 508:                 dst: "node:node-exit".to_string(),
+ 509:                 protocol: Protocol::Any,
+ 510:                 action: RuleAction::Allow,
+ 511:                 contexts: vec![TrafficContext::SharedExit],
+ 512:             }],
+ 513:         };
+ 514: 
+ 515:         let request = ContextualAccessRequest {
+ 516:             src: "user:local".to_string(),
+ 517:             dst: "node:node-exit".to_string(),
+ 518:             protocol: Protocol::Tcp,
+ 519:             context: TrafficContext::SharedExit,
+ 520:         };
+ 521: 
+ 522:         let unknown_membership = MembershipDirectory::default();
+ 523:         assert_eq!(
+ 524:             set.evaluate_with_membership(&request, &unknown_membership),
+ 525:             Decision::Deny
+ 526:         );
+ 527: 
+ 528:         let mut revoked_membership = MembershipDirectory::default();
+ 529:         revoked_membership.set_node_status("node-exit", MembershipStatus::Revoked);
+ 530:         assert_eq!(
+ 531:             set.evaluate_with_membership(&request, &revoked_membership),
+ 532:             Decision::Deny
+ 533:         );
+ 534: 
+ 535:         let mut active_membership = MembershipDirectory::default();
+ 536:         active_membership.set_node_status("node-exit", MembershipStatus::Active);
+ 537:         assert_eq!(
+ 538:             set.evaluate_with_membership(&request, &active_membership),
+ 539:             Decision::Allow
+ 540:         );
+ 541:     }
+ 542: 
+ 543:     #[test]
+ 544:     fn membership_aware_policy_preserves_protocol_filters() {
+ 545:         let set = ContextualPolicySet {
+ 546:             rules: vec![ContextualPolicyRule {
+ 547:                 src: "user:local".to_string(),
+ 548:                 dst: "node:node-a".to_string(),
+ 549:                 protocol: Protocol::Tcp,
+ 550:                 action: RuleAction::Allow,
+ 551:                 contexts: vec![TrafficContext::Mesh],
+ 552:             }],
+ 553:         };
+ 554:         let mut membership = MembershipDirectory::default();
+ 555:         membership.set_node_status("node-a", MembershipStatus::Active);
+ 556: 
+ 557:         let tcp = ContextualAccessRequest {
+ 558:             src: "user:local".to_string(),
+ 559:             dst: "node:node-a".to_string(),
+ 560:             protocol: Protocol::Tcp,
+ 561:             context: TrafficContext::Mesh,
+ 562:         };
+ 563:         let udp = ContextualAccessRequest {
+ 564:             src: "user:local".to_string(),
+ 565:             dst: "node:node-a".to_string(),
+ 566:             protocol: Protocol::Udp,
+ 567:             context: TrafficContext::Mesh,
+ 568:         };
+ 569: 
+ 570:         assert_eq!(
+ 571:             set.evaluate_with_membership(&tcp, &membership),
+ 572:             Decision::Allow
+ 573:         );
+ 574:         assert_eq!(
+ 575:             set.evaluate_with_membership(&udp, &membership),
+ 576:             Decision::Deny
+ 577:         );
+ 578:     }
+ 579: 
+ 580:     /// M5: A revoked node's traffic must be denied even when a permissive ACL
+ 581:     /// rule would otherwise allow it (revocation check runs before rule eval).
+ 582:     #[test]
+ 583:     fn test_revoked_node_acl_denied_before_rule_evaluation() {
+ 584:         // Wildcard allow-all rule — most permissive possible
+ 585:         let set = ContextualPolicySet {
+ 586:             rules: vec![ContextualPolicyRule {
+ 587:                 src: "*".to_string(),
+ 588:                 dst: "node:revoked-node".to_string(),
+ 589:                 protocol: Protocol::Any,
+ 590:                 action: RuleAction::Allow,
+ 591:                 contexts: vec![TrafficContext::Mesh],
+ 592:             }],
+ 593:         };
+ 594:         let request = ContextualAccessRequest {
+ 595:             src: "user:alice".to_string(),
+ 596:             dst: "node:revoked-node".to_string(),
+ 597:             protocol: Protocol::Tcp,
+ 598:             context: TrafficContext::Mesh,
+ 599:         };
+ 600: 
+ 601:         let mut membership = MembershipDirectory::default();
+ 602:         membership.set_node_status("revoked-node", MembershipStatus::Revoked);
+ 603: 
+ 604:         // Must deny despite the permissive rule
+ 605:         assert_eq!(
+ 606:             set.evaluate_with_membership(&request, &membership),
+ 607:             Decision::Deny,
+ 608:             "revoked node must be denied even with a permissive allow rule"
+ 609:         );
+ 610:     }
+ 611: 
+ 612:     /// M5: An active node's traffic proceeds to rule evaluation normally.
+ 613:     #[test]
+ 614:     fn test_active_node_acl_proceeds_to_rule_evaluation() {
+ 615:         let set = ContextualPolicySet {
+ 616:             rules: vec![ContextualPolicyRule {
+ 617:                 src: "user:alice".to_string(),
+ 618:                 dst: "node:active-node".to_string(),
+ 619:                 protocol: Protocol::Tcp,
+ 620:                 action: RuleAction::Allow,
+ 621:                 contexts: vec![TrafficContext::Mesh],
+ 622:             }],
+ 623:         };
+ 624:         let request = ContextualAccessRequest {
+ 625:             src: "user:alice".to_string(),
+ 626:             dst: "node:active-node".to_string(),
+ 627:             protocol: Protocol::Tcp,
+ 628:             context: TrafficContext::Mesh,
+ 629:         };
+ 630: 
+ 631:         let mut membership = MembershipDirectory::default();
+ 632:         membership.set_node_status("active-node", MembershipStatus::Active);
+ 633: 
+ 634:         // Active node — rule evaluation runs and the allow rule fires
+ 635:         assert_eq!(
+ 636:             set.evaluate_with_membership(&request, &membership),
+ 637:             Decision::Allow,
+ 638:             "active node must proceed to rule evaluation"
+ 639:         );
+ 640:     }
+ 641: }
+
+===== /crates/rustynet-policy/.gitignore =====
+
+   1: /target
+
+===== /crates/rustynet-policy/Cargo.toml =====
+
+   1: [package]
+   2: name = "rustynet-policy"
+   3: version.workspace = true
+   4: edition.workspace = true
+   5: license.workspace = true
+   6: authors.workspace = true
+   7: 
+   8: [dependencies]
+
