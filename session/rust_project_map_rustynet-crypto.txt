@@ -1,0 +1,1601 @@
+# Rust Project Map — rustynet-crypto
+
+Root: /Users/iwan/Desktop/Rustynet
+Captured: 2026-05-06T15:06:09+01:00
+Git: branch `main` @ 8a9c3eab12fe  ·  uncommitted files: 0
+Files: 3  ·  Lines of source: 1515
+
+## Crate Dependencies (within this workspace)
+
+Depends on (workspace): rustynet-windows-native
+Depended on by (workspace): rustynet-cli, rustynet-control, rustynetd
+
+## Public API Surface
+
+46 public items across 1 file(s).
+
+/crates/rustynet-crypto/src/lib.rs
+  L   33  pub struct PublicKey([u8
+  L   36  pub fn as_bytes(&self) -> &[u8; 32]
+  L   41  pub struct SecretKey([u8
+  L   44  pub fn as_bytes(&self) -> &[u8; 32]
+  L   48  pub fn ct_eq(&self, other: &SecretKey) -> subtle::Choice
+  L   66  pub struct NodeKeyPair
+  L   72  pub enum CryptoError
+  L  123  pub fn from_raw(public_key: [u8; 32], private_key: [u8; 32]) -> Result<Self, CryptoError>
+  L  140  pub enum CryptoAlgorithm
+  L  162  pub struct CompatibilityException
+  L  168  pub struct AlgorithmPolicy
+  L  173  pub fn with_exceptions(exceptions: Vec<CompatibilityException>) -> Result<Self, CryptoError>
+  L  186  pub fn validate(
+  L  213  pub fn validate_now(&self, algorithm: CryptoAlgorithm) -> Result<(), CryptoError>
+  L  249  pub fn unix_now() -> Result<u64, CryptoError>
+  L  258  pub struct EncryptedKeyBlob
+  L  264  pub trait OsSecureStore
+  L  270  pub enum KeyCustodyBackend
+  L  276  pub struct NoOsSecureStore
+  L  289  pub struct PlatformOsSecureStore
+  L  333  pub struct KeyCustodyManager<S: OsSecureStore>
+  L  342  pub enum OsStoreFallbackPolicy
+  L  349  pub fn new(
+  L  363  pub fn new_zeroizing(
+  L  378  pub fn with_fallback_policy(mut self, policy: OsStoreFallbackPolicy) -> Self
+  L  383  pub fn store_private_key(
+  L  411  pub fn load_private_key(&self, key_id: &str) -> Result<Vec<u8>, CryptoError>
+  L  481  pub fn store_macos_generic_password(
+  L  493  pub fn load_macos_generic_password(service: &str, account: &str) -> Result<Vec<u8>, CryptoError>
+  L  677  pub enum SigningProviderKind
+  L  684  pub struct SigningProviderPolicy
+  L  698  pub trait SigningProvider
+  L  706  pub struct Ed25519SigningProvider
+  L  725  pub fn from_seed(
+  L  740  pub fn verifying_key_hex(&self) -> String
+  L  772  pub fn validate_signing_provider_policy(
+  L  788  pub struct ProviderAttestation
+  L  795  pub fn create_provider_attestation(
+  L  809  pub fn verify_provider_attestation(
+  L  857  pub fn generate_key_custody_material() -> ([u8; 16], [u8; 24])
+  L  866  pub fn encrypt_private_key_envelope(
+  L  895  pub fn decrypt_private_key_envelope(
+  L  919  pub fn write_encrypted_key_file(
+  L 1015  pub fn read_encrypted_key_file(
+  L 1061  pub struct KeyCustodyPermissionPolicy
+  L 1075  pub fn validate_key_custody_permissions(
+
+
+## Document Tree
+
+`-- crates
+    `-- rustynet-crypto
+        |-- .gitignore  (1 lines)
+        |-- Cargo.toml  (19 lines)
+        `-- src
+            `-- lib.rs  (1495 lines)
+
+
+## Files
+
+===== /crates/rustynet-crypto/src/lib.rs =====
+
+   1: #![forbid(unsafe_code)]
+   2: 
+   3: use std::error::Error;
+   4: use std::fmt;
+   5: use std::path::{Path, PathBuf};
+   6: #[cfg(target_os = "linux")]
+   7: use std::process::Command;
+   8: #[cfg(target_os = "linux")]
+   9: use std::process::Stdio;
+  10: use std::time::{SystemTime, UNIX_EPOCH};
+  11: 
+  12: use argon2::Argon2;
+  13: use chacha20poly1305::aead::{Aead, KeyInit};
+  14: use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+  15: use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+  16: use rand::RngCore;
+  17: #[cfg(target_os = "windows")]
+  18: use rustynet_windows_native::{
+  19:     WindowsDpapiScope, dpapi_protect, dpapi_unprotect, inspect_file_sddl,
+  20: };
+  21: #[cfg(target_os = "macos")]
+  22: use security_framework::passwords::{get_generic_password, set_generic_password};
+  23: use sha2::{Digest, Sha256};
+  24: use subtle::ConstantTimeEq;
+  25: #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+  26: use zeroize::Zeroize;
+  27: use zeroize::Zeroizing;
+  28: 
+  29: #[cfg(target_os = "windows")]
+  30: const WINDOWS_DPAPI_KEY_CUSTODY_ROOT: &str = r"C:\ProgramData\RustyNet\secrets\key-custody";
+  31: 
+  32: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  33: pub struct PublicKey([u8; 32]);
+  34: 
+  35: impl PublicKey {
+  36:     pub fn as_bytes(&self) -> &[u8; 32] {
+  37:         &self.0
+  38:     }
+  39: }
+  40: 
+  41: pub struct SecretKey([u8; 32]);
+  42: 
+  43: impl SecretKey {
+  44:     pub fn as_bytes(&self) -> &[u8; 32] {
+  45:         &self.0
+  46:     }
+  47: 
+  48:     pub fn ct_eq(&self, other: &SecretKey) -> subtle::Choice {
+  49:         self.as_bytes().ct_eq(other.as_bytes())
+  50:     }
+  51: }
+  52: 
+  53: impl fmt::Debug for SecretKey {
+  54:     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  55:         f.write_str("SecretKey(REDACTED)")
+  56:     }
+  57: }
+  58: 
+  59: impl Drop for SecretKey {
+  60:     fn drop(&mut self) {
+  61:         self.0.fill(0);
+  62:     }
+  63: }
+  64: 
+  65: #[derive(Debug)]
+  66: pub struct NodeKeyPair {
+  67:     pub public_key: PublicKey,
+  68:     pub private_key: SecretKey,
+  69: }
+  70: 
+  71: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  72: pub enum CryptoError {
+  73:     InvalidLength,
+  74:     WeakMaterial,
+  75:     DeniedAlgorithm,
+  76:     ExceptionExpired,
+  77:     InvalidException,
+  78:     PermissionDenied,
+  79:     PermissionValidationUnavailable,
+  80:     OsStoreUnavailable,
+  81:     TimeUnavailable,
+  82:     InvalidClock,
+  83:     UnsupportedProviderPolicy,
+  84:     AttestationVerificationFailed,
+  85:     Io,
+  86:     KdfFailed,
+  87:     EncryptionFailed,
+  88:     DecryptionFailed,
+  89: }
+  90: 
+  91: impl fmt::Display for CryptoError {
+  92:     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  93:         match self {
+  94:             CryptoError::InvalidLength => f.write_str("invalid key length"),
+  95:             CryptoError::WeakMaterial => f.write_str("weak key material"),
+  96:             CryptoError::DeniedAlgorithm => f.write_str("algorithm denied by policy"),
+  97:             CryptoError::ExceptionExpired => f.write_str("compatibility exception has expired"),
+  98:             CryptoError::InvalidException => f.write_str("compatibility exception is invalid"),
+  99:             CryptoError::PermissionDenied => f.write_str("key custody permission check failed"),
+ 100:             CryptoError::PermissionValidationUnavailable => {
+ 101:                 f.write_str("permission validation unavailable on this platform")
+ 102:             }
+ 103:             CryptoError::OsStoreUnavailable => f.write_str("os secure store unavailable"),
+ 104:             CryptoError::TimeUnavailable => f.write_str("time source unavailable"),
+ 105:             CryptoError::InvalidClock => f.write_str("invalid system clock"),
+ 106:             CryptoError::UnsupportedProviderPolicy => {
+ 107:                 f.write_str("unsupported key custody provider policy")
+ 108:             }
+ 109:             CryptoError::AttestationVerificationFailed => {
+ 110:                 f.write_str("attestation verification failed")
+ 111:             }
+ 112:             CryptoError::Io => f.write_str("i/o error"),
+ 113:             CryptoError::KdfFailed => f.write_str("key derivation failed"),
+ 114:             CryptoError::EncryptionFailed => f.write_str("encryption failed"),
+ 115:             CryptoError::DecryptionFailed => f.write_str("decryption failed"),
+ 116:         }
+ 117:     }
+ 118: }
+ 119: 
+ 120: impl Error for CryptoError {}
+ 121: 
+ 122: impl NodeKeyPair {
+ 123:     pub fn from_raw(public_key: [u8; 32], private_key: [u8; 32]) -> Result<Self, CryptoError> {
+ 124:         if is_all_zeros(&public_key) || is_all_zeros(&private_key) {
+ 125:             return Err(CryptoError::WeakMaterial);
+ 126:         }
+ 127: 
+ 128:         Ok(Self {
+ 129:             public_key: PublicKey(public_key),
+ 130:             private_key: SecretKey(private_key),
+ 131:         })
+ 132:     }
+ 133: }
+ 134: 
+ 135: fn is_all_zeros(key: &[u8; 32]) -> bool {
+ 136:     key.iter().all(|value| *value == 0)
+ 137: }
+ 138: 
+ 139: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ 140: pub enum CryptoAlgorithm {
+ 141:     Tls13,
+ 142:     TunnelTransportAead,
+ 143:     Ed25519,
+ 144:     Sha256,
+ 145:     Sha512,
+ 146:     Blake2s,
+ 147:     Blake2b,
+ 148:     HkdfSha256,
+ 149:     Argon2id,
+ 150:     Aes256Gcm,
+ 151:     XChaCha20Poly1305,
+ 152:     Md5,
+ 153:     Sha1,
+ 154:     Rc4,
+ 155:     Des,
+ 156:     TripleDes,
+ 157:     BlowfishCbc,
+ 158:     WeakDh,
+ 159: }
+ 160: 
+ 161: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ 162: pub struct CompatibilityException {
+ 163:     pub algorithm: CryptoAlgorithm,
+ 164:     pub expires_unix_seconds: u64,
+ 165: }
+ 166: 
+ 167: #[derive(Debug, Clone, PartialEq, Eq, Default)]
+ 168: pub struct AlgorithmPolicy {
+ 169:     exceptions: Vec<CompatibilityException>,
+ 170: }
+ 171: 
+ 172: impl AlgorithmPolicy {
+ 173:     pub fn with_exceptions(exceptions: Vec<CompatibilityException>) -> Result<Self, CryptoError> {
+ 174:         if !exceptions.is_empty() {
+ 175:             return Err(CryptoError::InvalidException);
+ 176:         }
+ 177:         for exception in &exceptions {
+ 178:             if !is_denylisted(exception.algorithm) {
+ 179:                 return Err(CryptoError::InvalidException);
+ 180:             }
+ 181:         }
+ 182: 
+ 183:         Ok(Self { exceptions })
+ 184:     }
+ 185: 
+ 186:     pub fn validate(
+ 187:         &self,
+ 188:         algorithm: CryptoAlgorithm,
+ 189:         now_unix_seconds: u64,
+ 190:     ) -> Result<(), CryptoError> {
+ 191:         if is_allowlisted(algorithm) {
+ 192:             return Ok(());
+ 193:         }
+ 194: 
+ 195:         if is_denylisted(algorithm) {
+ 196:             if let Some(exception) = self
+ 197:                 .exceptions
+ 198:                 .iter()
+ 199:                 .find(|entry| entry.algorithm == algorithm)
+ 200:             {
+ 201:                 if now_unix_seconds <= exception.expires_unix_seconds {
+ 202:                     return Ok(());
+ 203:                 }
+ 204:                 return Err(CryptoError::ExceptionExpired);
+ 205:             }
+ 206: 
+ 207:             return Err(CryptoError::DeniedAlgorithm);
+ 208:         }
+ 209: 
+ 210:         Err(CryptoError::DeniedAlgorithm)
+ 211:     }
+ 212: 
+ 213:     pub fn validate_now(&self, algorithm: CryptoAlgorithm) -> Result<(), CryptoError> {
+ 214:         let now = unix_now()?;
+ 215:         self.validate(algorithm, now)
+ 216:     }
+ 217: }
+ 218: 
+ 219: fn is_allowlisted(algorithm: CryptoAlgorithm) -> bool {
+ 220:     matches!(
+ 221:         algorithm,
+ 222:         CryptoAlgorithm::Tls13
+ 223:             | CryptoAlgorithm::TunnelTransportAead
+ 224:             | CryptoAlgorithm::Ed25519
+ 225:             | CryptoAlgorithm::Sha256
+ 226:             | CryptoAlgorithm::Sha512
+ 227:             | CryptoAlgorithm::Blake2s
+ 228:             | CryptoAlgorithm::Blake2b
+ 229:             | CryptoAlgorithm::HkdfSha256
+ 230:             | CryptoAlgorithm::Argon2id
+ 231:             | CryptoAlgorithm::Aes256Gcm
+ 232:             | CryptoAlgorithm::XChaCha20Poly1305
+ 233:     )
+ 234: }
+ 235: 
+ 236: fn is_denylisted(algorithm: CryptoAlgorithm) -> bool {
+ 237:     matches!(
+ 238:         algorithm,
+ 239:         CryptoAlgorithm::Md5
+ 240:             | CryptoAlgorithm::Sha1
+ 241:             | CryptoAlgorithm::Rc4
+ 242:             | CryptoAlgorithm::Des
+ 243:             | CryptoAlgorithm::TripleDes
+ 244:             | CryptoAlgorithm::BlowfishCbc
+ 245:             | CryptoAlgorithm::WeakDh
+ 246:     )
+ 247: }
+ 248: 
+ 249: pub fn unix_now() -> Result<u64, CryptoError> {
+ 250:     let now = SystemTime::now();
+ 251:     let duration = now
+ 252:         .duration_since(UNIX_EPOCH)
+ 253:         .map_err(|_| CryptoError::InvalidClock)?;
+ 254:     Ok(duration.as_secs())
+ 255: }
+ 256: 
+ 257: #[derive(Debug, Clone, PartialEq, Eq)]
+ 258: pub struct EncryptedKeyBlob {
+ 259:     pub salt: [u8; 16],
+ 260:     pub nonce: [u8; 24],
+ 261:     pub ciphertext: Vec<u8>,
+ 262: }
+ 263: 
+ 264: pub trait OsSecureStore {
+ 265:     fn store_key(&self, key_id: &str, key_material: &[u8]) -> Result<(), CryptoError>;
+ 266:     fn load_key(&self, key_id: &str) -> Result<Vec<u8>, CryptoError>;
+ 267: }
+ 268: 
+ 269: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ 270: pub enum KeyCustodyBackend {
+ 271:     OsSecureStore,
+ 272:     EncryptedFileFallback,
+ 273: }
+ 274: 
+ 275: #[derive(Debug, Default, Clone, Copy)]
+ 276: pub struct NoOsSecureStore;
+ 277: 
+ 278: impl OsSecureStore for NoOsSecureStore {
+ 279:     fn store_key(&self, _key_id: &str, _key_material: &[u8]) -> Result<(), CryptoError> {
+ 280:         Err(CryptoError::OsStoreUnavailable)
+ 281:     }
+ 282: 
+ 283:     fn load_key(&self, _key_id: &str) -> Result<Vec<u8>, CryptoError> {
+ 284:         Err(CryptoError::OsStoreUnavailable)
+ 285:     }
+ 286: }
+ 287: 
+ 288: #[derive(Debug, Clone, Copy, Default)]
+ 289: pub struct PlatformOsSecureStore;
+ 290: 
+ 291: impl OsSecureStore for PlatformOsSecureStore {
+ 292:     fn store_key(&self, key_id: &str, key_material: &[u8]) -> Result<(), CryptoError> {
+ 293:         #[cfg(target_os = "macos")]
+ 294:         {
+ 295:             store_in_macos_keychain(key_id, key_material)
+ 296:         }
+ 297:         #[cfg(target_os = "linux")]
+ 298:         {
+ 299:             store_in_linux_secret_service(key_id, key_material)
+ 300:         }
+ 301:         #[cfg(target_os = "windows")]
+ 302:         {
+ 303:             store_in_windows_dpapi(key_id, key_material)
+ 304:         }
+ 305:         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+ 306:         {
+ 307:             let _ = (key_id, key_material);
+ 308:             Err(CryptoError::OsStoreUnavailable)
+ 309:         }
+ 310:     }
+ 311: 
+ 312:     fn load_key(&self, key_id: &str) -> Result<Vec<u8>, CryptoError> {
+ 313:         #[cfg(target_os = "macos")]
+ 314:         {
+ 315:             load_from_macos_keychain(key_id)
+ 316:         }
+ 317:         #[cfg(target_os = "linux")]
+ 318:         {
+ 319:             load_from_linux_secret_service(key_id)
+ 320:         }
+ 321:         #[cfg(target_os = "windows")]
+ 322:         {
+ 323:             load_from_windows_dpapi(key_id)
+ 324:         }
+ 325:         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+ 326:         {
+ 327:             let _ = key_id;
+ 328:             Err(CryptoError::OsStoreUnavailable)
+ 329:         }
+ 330:     }
+ 331: }
+ 332: 
+ 333: pub struct KeyCustodyManager<S: OsSecureStore> {
+ 334:     os_store: S,
+ 335:     fallback_directory: PathBuf,
+ 336:     fallback_passphrase: Zeroizing<String>,
+ 337:     permission_policy: KeyCustodyPermissionPolicy,
+ 338:     fallback_policy: OsStoreFallbackPolicy,
+ 339: }
+ 340: 
+ 341: #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+ 342: pub enum OsStoreFallbackPolicy {
+ 343:     #[default]
+ 344:     AllowEncryptedFileFallback,
+ 345:     RequireOsSecureStore,
+ 346: }
+ 347: 
+ 348: impl<S: OsSecureStore> KeyCustodyManager<S> {
+ 349:     pub fn new(
+ 350:         os_store: S,
+ 351:         fallback_directory: PathBuf,
+ 352:         fallback_passphrase: String,
+ 353:         permission_policy: KeyCustodyPermissionPolicy,
+ 354:     ) -> Self {
+ 355:         Self::new_zeroizing(
+ 356:             os_store,
+ 357:             fallback_directory,
+ 358:             Zeroizing::new(fallback_passphrase),
+ 359:             permission_policy,
+ 360:         )
+ 361:     }
+ 362: 
+ 363:     pub fn new_zeroizing(
+ 364:         os_store: S,
+ 365:         fallback_directory: PathBuf,
+ 366:         fallback_passphrase: Zeroizing<String>,
+ 367:         permission_policy: KeyCustodyPermissionPolicy,
+ 368:     ) -> Self {
+ 369:         Self {
+ 370:             os_store,
+ 371:             fallback_directory,
+ 372:             fallback_passphrase,
+ 373:             permission_policy,
+ 374:             fallback_policy: OsStoreFallbackPolicy::default(),
+ 375:         }
+ 376:     }
+ 377: 
+ 378:     pub fn with_fallback_policy(mut self, policy: OsStoreFallbackPolicy) -> Self {
+ 379:         self.fallback_policy = policy;
+ 380:         self
+ 381:     }
+ 382: 
+ 383:     pub fn store_private_key(
+ 384:         &self,
+ 385:         key_id: &str,
+ 386:         key_material: &[u8],
+ 387:     ) -> Result<KeyCustodyBackend, CryptoError> {
+ 388:         match self.os_store.store_key(key_id, key_material) {
+ 389:             Ok(()) => Ok(KeyCustodyBackend::OsSecureStore),
+ 390:             Err(CryptoError::OsStoreUnavailable) => {
+ 391:                 if matches!(
+ 392:                     self.fallback_policy,
+ 393:                     OsStoreFallbackPolicy::RequireOsSecureStore
+ 394:                 ) {
+ 395:                     return Err(CryptoError::OsStoreUnavailable);
+ 396:                 }
+ 397:                 let file_path = self.fallback_file_path(key_id)?;
+ 398:                 write_encrypted_key_file(
+ 399:                     &self.fallback_directory,
+ 400:                     &file_path,
+ 401:                     key_material,
+ 402:                     self.fallback_passphrase.as_str(),
+ 403:                     self.permission_policy,
+ 404:                 )?;
+ 405:                 Ok(KeyCustodyBackend::EncryptedFileFallback)
+ 406:             }
+ 407:             Err(other) => Err(other),
+ 408:         }
+ 409:     }
+ 410: 
+ 411:     pub fn load_private_key(&self, key_id: &str) -> Result<Vec<u8>, CryptoError> {
+ 412:         match self.os_store.load_key(key_id) {
+ 413:             Ok(key) => Ok(key),
+ 414:             Err(CryptoError::OsStoreUnavailable) => {
+ 415:                 if matches!(
+ 416:                     self.fallback_policy,
+ 417:                     OsStoreFallbackPolicy::RequireOsSecureStore
+ 418:                 ) {
+ 419:                     return Err(CryptoError::OsStoreUnavailable);
+ 420:                 }
+ 421:                 let file_path = self.fallback_file_path(key_id)?;
+ 422:                 read_encrypted_key_file(
+ 423:                     &self.fallback_directory,
+ 424:                     &file_path,
+ 425:                     self.fallback_passphrase.as_str(),
+ 426:                     self.permission_policy,
+ 427:                 )
+ 428:             }
+ 429:             Err(other) => Err(other),
+ 430:         }
+ 431:     }
+ 432: 
+ 433:     fn fallback_file_path(&self, key_id: &str) -> Result<PathBuf, CryptoError> {
+ 434:         if !is_valid_key_identifier(key_id) {
+ 435:             return Err(CryptoError::InvalidLength);
+ 436:         }
+ 437:         Ok(self.fallback_directory.join(format!("{key_id}.enc")))
+ 438:     }
+ 439: }
+ 440: 
+ 441: fn is_valid_key_identifier(value: &str) -> bool {
+ 442:     if value.is_empty() {
+ 443:         return false;
+ 444:     }
+ 445:     value
+ 446:         .chars()
+ 447:         .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+ 448: }
+ 449: 
+ 450: #[cfg(target_os = "macos")]
+ 451: fn store_in_macos_keychain(key_id: &str, key_material: &[u8]) -> Result<(), CryptoError> {
+ 452:     store_macos_generic_password(
+ 453:         format!("rustynet.{key_id}").as_str(),
+ 454:         "rustynet",
+ 455:         key_material,
+ 456:     )
+ 457: }
+ 458: 
+ 459: #[cfg(target_os = "macos")]
+ 460: fn load_from_macos_keychain(key_id: &str) -> Result<Vec<u8>, CryptoError> {
+ 461:     let mut value = load_macos_generic_password(format!("rustynet.{key_id}").as_str(), "rustynet")
+ 462:         .map_err(|_| CryptoError::OsStoreUnavailable)?;
+ 463: 
+ 464:     if let Ok(text) = std::str::from_utf8(&value) {
+ 465:         let trimmed = text.trim();
+ 466:         let maybe_hex_decoded = (!trimmed.is_empty()
+ 467:             && (trimmed.len() & 1) == 0
+ 468:             && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()))
+ 469:         .then(|| hex_decode(trimmed))
+ 470:         .and_then(Result::ok);
+ 471:         if let Some(decoded) = maybe_hex_decoded {
+ 472:             value.zeroize();
+ 473:             return Ok(decoded);
+ 474:         }
+ 475:     }
+ 476: 
+ 477:     Ok(value)
+ 478: }
+ 479: 
+ 480: #[cfg(target_os = "macos")]
+ 481: pub fn store_macos_generic_password(
+ 482:     service: &str,
+ 483:     account: &str,
+ 484:     secret: &[u8],
+ 485: ) -> Result<(), CryptoError> {
+ 486:     if service.trim().is_empty() || account.trim().is_empty() {
+ 487:         return Err(CryptoError::OsStoreUnavailable);
+ 488:     }
+ 489:     set_generic_password(service, account, secret).map_err(|_| CryptoError::OsStoreUnavailable)
+ 490: }
+ 491: 
+ 492: #[cfg(target_os = "macos")]
+ 493: pub fn load_macos_generic_password(service: &str, account: &str) -> Result<Vec<u8>, CryptoError> {
+ 494:     if service.trim().is_empty() || account.trim().is_empty() {
+ 495:         return Err(CryptoError::OsStoreUnavailable);
+ 496:     }
+ 497:     get_generic_password(service, account).map_err(|_| CryptoError::OsStoreUnavailable)
+ 498: }
+ 499: 
+ 500: #[cfg(target_os = "linux")]
+ 501: fn store_in_linux_secret_service(key_id: &str, key_material: &[u8]) -> Result<(), CryptoError> {
+ 502:     let mut child = Command::new("secret-tool")
+ 503:         .arg("store")
+ 504:         .arg("--label=Rustynet Key")
+ 505:         .arg("rustynet-key-id")
+ 506:         .arg(key_id)
+ 507:         .stdin(Stdio::piped())
+ 508:         .stdout(Stdio::null())
+ 509:         .stderr(Stdio::null())
+ 510:         .spawn()
+ 511:         .map_err(|_| CryptoError::OsStoreUnavailable)?;
+ 512:     let mut stdin = child.stdin.take().ok_or(CryptoError::OsStoreUnavailable)?;
+ 513:     use std::io::Write;
+ 514:     let encoded = Zeroizing::new(hex_bytes(key_material));
+ 515:     stdin
+ 516:         .write_all(encoded.as_bytes())
+ 517:         .map_err(|_| CryptoError::OsStoreUnavailable)?;
+ 518:     drop(stdin);
+ 519:     let status = child.wait().map_err(|_| CryptoError::OsStoreUnavailable)?;
+ 520:     if status.success() {
+ 521:         return Ok(());
+ 522:     }
+ 523:     Err(CryptoError::OsStoreUnavailable)
+ 524: }
+ 525: 
+ 526: #[cfg(target_os = "linux")]
+ 527: fn load_from_linux_secret_service(key_id: &str) -> Result<Vec<u8>, CryptoError> {
+ 528:     let output = Command::new("secret-tool")
+ 529:         .arg("lookup")
+ 530:         .arg("rustynet-key-id")
+ 531:         .arg(key_id)
+ 532:         .output()
+ 533:         .map_err(|_| CryptoError::OsStoreUnavailable)?;
+ 534:     if !output.status.success() {
+ 535:         return Err(CryptoError::OsStoreUnavailable);
+ 536:     }
+ 537:     let mut value =
+ 538:         String::from_utf8(output.stdout).map_err(|_| CryptoError::OsStoreUnavailable)?;
+ 539:     let decoded = {
+ 540:         let trimmed = value.trim();
+ 541:         hex_decode(trimmed)
+ 542:     };
+ 543:     value.zeroize();
+ 544:     decoded
+ 545: }
+ 546: 
+ 547: #[cfg(target_os = "windows")]
+ 548: fn store_in_windows_dpapi(key_id: &str, key_material: &[u8]) -> Result<(), CryptoError> {
+ 549:     let root = windows_dpapi_root()?;
+ 550:     validate_windows_dpapi_root(root.as_path())?;
+ 551:     let path = windows_dpapi_file_path(root.as_path(), key_id)?;
+ 552:     if path.exists() {
+ 553:         validate_windows_dpapi_file(path.as_path())?;
+ 554:     }
+ 555:     let mut protected = dpapi_protect(
+ 556:         key_material,
+ 557:         // LocalMachine scope is required so the daemon service (running as
+ 558:         // NT AUTHORITY\SYSTEM / LocalSystem) can decrypt key material that
+ 559:         // was stored by the bootstrap/install helper (running as the SSH
+ 560:         // user or an interactive admin). CurrentUser scope ties the blob
+ 561:         // to the encrypting user's master key, which is inaccessible to
+ 562:         // LocalSystem and causes CryptoError::DecryptionFailed at service
+ 563:         // startup (prepare_runtime_wireguard_key_material). NTFS ACLs on
+ 564:         // the key-custody directory (set by windows-runtime-acls-check and
+ 565:         // validated by validate_windows_dpapi_root/file) are the access
+ 566:         // boundary; DPAPI LocalMachine encryption provides at-rest
+ 567:         // protection against off-machine extraction.
+ 568:         WindowsDpapiScope::LocalMachine,
+ 569:         &format!("RustyNet key {key_id}"),
+ 570:     )
+ 571:     .map_err(|_| CryptoError::EncryptionFailed)?;
+ 572:     let write_result = write_windows_dpapi_blob(path.as_path(), &protected);
+ 573:     protected.zeroize();
+ 574:     write_result
+ 575: }
+ 576: 
+ 577: #[cfg(target_os = "windows")]
+ 578: fn load_from_windows_dpapi(key_id: &str) -> Result<Vec<u8>, CryptoError> {
+ 579:     let root = windows_dpapi_root()?;
+ 580:     validate_windows_dpapi_root(root.as_path())?;
+ 581:     let path = windows_dpapi_file_path(root.as_path(), key_id)?;
+ 582:     validate_windows_dpapi_file(path.as_path())?;
+ 583:     let mut protected = std::fs::read(path.as_path()).map_err(|_| CryptoError::Io)?;
+ 584:     let result = dpapi_unprotect(&protected).map_err(|_| CryptoError::DecryptionFailed);
+ 585:     protected.zeroize();
+ 586:     result
+ 587: }
+ 588: 
+ 589: #[cfg(target_os = "windows")]
+ 590: fn windows_dpapi_root() -> Result<PathBuf, CryptoError> {
+ 591:     let root = PathBuf::from(WINDOWS_DPAPI_KEY_CUSTODY_ROOT);
+ 592:     if !root.exists() {
+ 593:         return Err(CryptoError::OsStoreUnavailable);
+ 594:     }
+ 595:     Ok(root)
+ 596: }
+ 597: 
+ 598: #[cfg(target_os = "windows")]
+ 599: fn windows_dpapi_file_path(root: &Path, key_id: &str) -> Result<PathBuf, CryptoError> {
+ 600:     if !is_valid_key_identifier(key_id) {
+ 601:         return Err(CryptoError::InvalidLength);
+ 602:     }
+ 603:     Ok(root.join(format!("{key_id}.dpapi")))
+ 604: }
+ 605: 
+ 606: #[cfg(target_os = "windows")]
+ 607: fn validate_windows_dpapi_root(root: &Path) -> Result<(), CryptoError> {
+ 608:     let metadata = std::fs::symlink_metadata(root).map_err(|_| CryptoError::Io)?;
+ 609:     if metadata.file_type().is_symlink() || !metadata.is_dir() {
+ 610:         return Err(CryptoError::PermissionDenied);
+ 611:     }
+ 612:     let sddl = inspect_file_sddl(root).map_err(|_| CryptoError::PermissionValidationUnavailable)?;
+ 613:     if !sddl.contains("D:P")
+ 614:         || sddl.contains(";;;WD)")
+ 615:         || sddl.contains(";;;AU)")
+ 616:         || sddl.contains(";;;BU)")
+ 617:     {
+ 618:         return Err(CryptoError::PermissionDenied);
+ 619:     }
+ 620:     Ok(())
+ 621: }
+ 622: 
+ 623: #[cfg(target_os = "windows")]
+ 624: fn validate_windows_dpapi_file(path: &Path) -> Result<(), CryptoError> {
+ 625:     let metadata = std::fs::symlink_metadata(path).map_err(|_| CryptoError::Io)?;
+ 626:     if metadata.file_type().is_symlink() || !metadata.is_file() {
+ 627:         return Err(CryptoError::PermissionDenied);
+ 628:     }
+ 629:     let sddl = inspect_file_sddl(path).map_err(|_| CryptoError::PermissionValidationUnavailable)?;
+ 630:     if !sddl.contains("D:")
+ 631:         || sddl.contains(";;;WD)")
+ 632:         || sddl.contains(";;;AU)")
+ 633:         || sddl.contains(";;;BU)")
+ 634:     {
+ 635:         return Err(CryptoError::PermissionDenied);
+ 636:     }
+ 637:     Ok(())
+ 638: }
+ 639: 
+ 640: #[cfg(target_os = "windows")]
+ 641: fn write_windows_dpapi_blob(path: &Path, bytes: &[u8]) -> Result<(), CryptoError> {
+ 642:     use std::fs::OpenOptions;
+ 643:     use std::io::Write;
+ 644: 
+ 645:     let parent = path.parent().ok_or(CryptoError::Io)?;
+ 646:     validate_windows_dpapi_root(parent)?;
+ 647:     let candidate = parent.join(format!(
+ 648:         ".{}.{}.tmp",
+ 649:         path.file_name()
+ 650:             .and_then(|value| value.to_str())
+ 651:             .unwrap_or("key"),
+ 652:         std::process::id()
+ 653:     ));
+ 654:     if candidate.exists() {
+ 655:         let metadata =
+ 656:             std::fs::symlink_metadata(candidate.as_path()).map_err(|_| CryptoError::Io)?;
+ 657:         if metadata.file_type().is_symlink() || !metadata.is_file() {
+ 658:             return Err(CryptoError::PermissionDenied);
+ 659:         }
+ 660:         std::fs::remove_file(candidate.as_path()).map_err(|_| CryptoError::Io)?;
+ 661:     }
+ 662:     let mut file = OpenOptions::new()
+ 663:         .write(true)
+ 664:         .create_new(true)
+ 665:         .open(candidate.as_path())
+ 666:         .map_err(|_| CryptoError::Io)?;
+ 667:     file.write_all(bytes).map_err(|_| CryptoError::Io)?;
+ 668:     file.flush().map_err(|_| CryptoError::Io)?;
+ 669:     if path.exists() {
+ 670:         validate_windows_dpapi_file(path)?;
+ 671:         std::fs::remove_file(path).map_err(|_| CryptoError::Io)?;
+ 672:     }
+ 673:     std::fs::rename(candidate.as_path(), path).map_err(|_| CryptoError::Io)
+ 674: }
+ 675: 
+ 676: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ 677: pub enum SigningProviderKind {
+ 678:     LocalEncryptedFile,
+ 679:     Kms,
+ 680:     Hsm,
+ 681: }
+ 682: 
+ 683: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ 684: pub struct SigningProviderPolicy {
+ 685:     pub require_hardware_backed_primary: bool,
+ 686:     pub allow_local_fallback: bool,
+ 687: }
+ 688: 
+ 689: impl Default for SigningProviderPolicy {
+ 690:     fn default() -> Self {
+ 691:         Self {
+ 692:             require_hardware_backed_primary: true,
+ 693:             allow_local_fallback: false,
+ 694:         }
+ 695:     }
+ 696: }
+ 697: 
+ 698: pub trait SigningProvider {
+ 699:     fn kind(&self) -> SigningProviderKind;
+ 700:     fn key_identifier(&self) -> &str;
+ 701:     fn sign_attestation(&self, payload: &[u8]) -> Result<Vec<u8>, CryptoError>;
+ 702:     fn verify_attestation(&self, payload: &[u8], signature: &[u8]) -> Result<(), CryptoError>;
+ 703: }
+ 704: 
+ 705: #[derive(Clone, PartialEq, Eq)]
+ 706: pub struct Ed25519SigningProvider {
+ 707:     provider_kind: SigningProviderKind,
+ 708:     key_id: String,
+ 709:     signing_key: SigningKey,
+ 710:     verifying_key: VerifyingKey,
+ 711: }
+ 712: 
+ 713: impl fmt::Debug for Ed25519SigningProvider {
+ 714:     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ 715:         f.debug_struct("Ed25519SigningProvider")
+ 716:             .field("provider_kind", &self.provider_kind)
+ 717:             .field("key_id", &self.key_id)
+ 718:             .field("signing_key", &"REDACTED")
+ 719:             .field("verifying_key", &hex_bytes(self.verifying_key.as_bytes()))
+ 720:             .finish()
+ 721:     }
+ 722: }
+ 723: 
+ 724: impl Ed25519SigningProvider {
+ 725:     pub fn from_seed(
+ 726:         provider_kind: SigningProviderKind,
+ 727:         key_id: impl Into<String>,
+ 728:         seed: [u8; 32],
+ 729:     ) -> Self {
+ 730:         let signing_key = SigningKey::from_bytes(&seed);
+ 731:         let verifying_key = signing_key.verifying_key();
+ 732:         Self {
+ 733:             provider_kind,
+ 734:             key_id: key_id.into(),
+ 735:             signing_key,
+ 736:             verifying_key,
+ 737:         }
+ 738:     }
+ 739: 
+ 740:     pub fn verifying_key_hex(&self) -> String {
+ 741:         hex_bytes(self.verifying_key.as_bytes())
+ 742:     }
+ 743: }
+ 744: 
+ 745: impl SigningProvider for Ed25519SigningProvider {
+ 746:     fn kind(&self) -> SigningProviderKind {
+ 747:         self.provider_kind
+ 748:     }
+ 749: 
+ 750:     fn key_identifier(&self) -> &str {
+ 751:         &self.key_id
+ 752:     }
+ 753: 
+ 754:     fn sign_attestation(&self, payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
+ 755:         let signature = self.signing_key.sign(payload);
+ 756:         Ok(signature.to_bytes().to_vec())
+ 757:     }
+ 758: 
+ 759:     fn verify_attestation(&self, payload: &[u8], signature: &[u8]) -> Result<(), CryptoError> {
+ 760:         if signature.len() != 64 {
+ 761:             return Err(CryptoError::AttestationVerificationFailed);
+ 762:         }
+ 763:         let mut bytes = [0u8; 64];
+ 764:         bytes.copy_from_slice(signature);
+ 765:         let signature = Signature::from_bytes(&bytes);
+ 766:         self.verifying_key
+ 767:             .verify(payload, &signature)
+ 768:             .map_err(|_| CryptoError::AttestationVerificationFailed)
+ 769:     }
+ 770: }
+ 771: 
+ 772: pub fn validate_signing_provider_policy(
+ 773:     primary: SigningProviderKind,
+ 774:     fallback: Option<SigningProviderKind>,
+ 775:     policy: SigningProviderPolicy,
+ 776: ) -> Result<(), CryptoError> {
+ 777:     if policy.require_hardware_backed_primary && primary == SigningProviderKind::LocalEncryptedFile
+ 778:     {
+ 779:         return Err(CryptoError::UnsupportedProviderPolicy);
+ 780:     }
+ 781:     if !policy.allow_local_fallback && fallback == Some(SigningProviderKind::LocalEncryptedFile) {
+ 782:         return Err(CryptoError::UnsupportedProviderPolicy);
+ 783:     }
+ 784:     Ok(())
+ 785: }
+ 786: 
+ 787: #[derive(Debug, Clone, PartialEq, Eq)]
+ 788: pub struct ProviderAttestation {
+ 789:     pub provider_kind: SigningProviderKind,
+ 790:     pub key_identifier: String,
+ 791:     pub payload_digest_hex: String,
+ 792:     pub signature_hex: String,
+ 793: }
+ 794: 
+ 795: pub fn create_provider_attestation(
+ 796:     provider: &dyn SigningProvider,
+ 797:     payload: &[u8],
+ 798: ) -> Result<ProviderAttestation, CryptoError> {
+ 799:     let payload_digest = hex_bytes(&Sha256::digest(payload));
+ 800:     let signature = provider.sign_attestation(payload)?;
+ 801:     Ok(ProviderAttestation {
+ 802:         provider_kind: provider.kind(),
+ 803:         key_identifier: provider.key_identifier().to_string(),
+ 804:         payload_digest_hex: payload_digest,
+ 805:         signature_hex: hex_bytes(&signature),
+ 806:     })
+ 807: }
+ 808: 
+ 809: pub fn verify_provider_attestation(
+ 810:     provider: &dyn SigningProvider,
+ 811:     payload: &[u8],
+ 812:     attestation: &ProviderAttestation,
+ 813: ) -> Result<(), CryptoError> {
+ 814:     if attestation.provider_kind != provider.kind() {
+ 815:         return Err(CryptoError::AttestationVerificationFailed);
+ 816:     }
+ 817:     if attestation.key_identifier != provider.key_identifier() {
+ 818:         return Err(CryptoError::AttestationVerificationFailed);
+ 819:     }
+ 820: 
+ 821:     let expected_payload = hex_bytes(&Sha256::digest(payload));
+ 822:     if expected_payload != attestation.payload_digest_hex {
+ 823:         return Err(CryptoError::AttestationVerificationFailed);
+ 824:     }
+ 825: 
+ 826:     let signature = hex_decode(attestation.signature_hex.as_str())?;
+ 827:     provider.verify_attestation(payload, &signature)
+ 828: }
+ 829: 
+ 830: fn hex_bytes(bytes: &[u8]) -> String {
+ 831:     let mut out = String::with_capacity(bytes.len() * 2);
+ 832:     for byte in bytes {
+ 833:         out.push_str(&format!("{byte:02x}"));
+ 834:     }
+ 835:     out
+ 836: }
+ 837: 
+ 838: fn hex_decode(value: &str) -> Result<Vec<u8>, CryptoError> {
+ 839:     let bytes = value.as_bytes();
+ 840:     if bytes.is_empty() || (bytes.len() & 1) != 0 {
+ 841:         return Err(CryptoError::AttestationVerificationFailed);
+ 842:     }
+ 843: 
+ 844:     let mut out = Vec::with_capacity(bytes.len() / 2);
+ 845:     for pair in bytes.chunks_exact(2) {
+ 846:         let hi = (pair[0] as char)
+ 847:             .to_digit(16)
+ 848:             .ok_or(CryptoError::AttestationVerificationFailed)?;
+ 849:         let lo = (pair[1] as char)
+ 850:             .to_digit(16)
+ 851:             .ok_or(CryptoError::AttestationVerificationFailed)?;
+ 852:         out.push(((hi << 4) | lo) as u8);
+ 853:     }
+ 854:     Ok(out)
+ 855: }
+ 856: 
+ 857: pub fn generate_key_custody_material() -> ([u8; 16], [u8; 24]) {
+ 858:     let mut rng = rand::rng();
+ 859:     let mut salt = [0u8; 16];
+ 860:     let mut nonce = [0u8; 24];
+ 861:     rng.fill_bytes(&mut salt);
+ 862:     rng.fill_bytes(&mut nonce);
+ 863:     (salt, nonce)
+ 864: }
+ 865: 
+ 866: pub fn encrypt_private_key_envelope(
+ 867:     plaintext: &[u8],
+ 868:     passphrase: &str,
+ 869:     salt: [u8; 16],
+ 870:     nonce: [u8; 24],
+ 871: ) -> Result<EncryptedKeyBlob, CryptoError> {
+ 872:     let mut key = [0u8; 32];
+ 873:     Argon2::default()
+ 874:         .hash_password_into(passphrase.as_bytes(), &salt, &mut key)
+ 875:         .map_err(|_| CryptoError::KdfFailed)?;
+ 876: 
+ 877:     let cipher = XChaCha20Poly1305::new((&key).into());
+ 878:     let ciphertext = match cipher.encrypt(XNonce::from_slice(&nonce), plaintext) {
+ 879:         Ok(value) => value,
+ 880:         Err(_) => {
+ 881:             key.fill(0);
+ 882:             return Err(CryptoError::EncryptionFailed);
+ 883:         }
+ 884:     };
+ 885: 
+ 886:     key.fill(0);
+ 887: 
+ 888:     Ok(EncryptedKeyBlob {
+ 889:         salt,
+ 890:         nonce,
+ 891:         ciphertext,
+ 892:     })
+ 893: }
+ 894: 
+ 895: pub fn decrypt_private_key_envelope(
+ 896:     blob: &EncryptedKeyBlob,
+ 897:     passphrase: &str,
+ 898: ) -> Result<Vec<u8>, CryptoError> {
+ 899:     let mut key = [0u8; 32];
+ 900:     Argon2::default()
+ 901:         .hash_password_into(passphrase.as_bytes(), &blob.salt, &mut key)
+ 902:         .map_err(|_| CryptoError::KdfFailed)?;
+ 903: 
+ 904:     let cipher = XChaCha20Poly1305::new((&key).into());
+ 905:     let plaintext = match cipher.decrypt(XNonce::from_slice(&blob.nonce), blob.ciphertext.as_ref())
+ 906:     {
+ 907:         Ok(value) => value,
+ 908:         Err(_) => {
+ 909:             key.fill(0);
+ 910:             return Err(CryptoError::DecryptionFailed);
+ 911:         }
+ 912:     };
+ 913: 
+ 914:     key.fill(0);
+ 915: 
+ 916:     Ok(plaintext)
+ 917: }
+ 918: 
+ 919: pub fn write_encrypted_key_file(
+ 920:     directory: &Path,
+ 921:     file: &Path,
+ 922:     plaintext: &[u8],
+ 923:     passphrase: &str,
+ 924:     policy: KeyCustodyPermissionPolicy,
+ 925: ) -> Result<(), CryptoError> {
+ 926:     let (salt, nonce) = generate_key_custody_material();
+ 927:     let blob = encrypt_private_key_envelope(plaintext, passphrase, salt, nonce)?;
+ 928:     let encoded = encode_encrypted_blob(&blob);
+ 929: 
+ 930:     if directory.exists() {
+ 931:         let directory_link_metadata =
+ 932:             std::fs::symlink_metadata(directory).map_err(|_| CryptoError::Io)?;
+ 933:         if directory_link_metadata.file_type().is_symlink() || !directory_link_metadata.is_dir() {
+ 934:             return Err(CryptoError::PermissionDenied);
+ 935:         }
+ 936:     }
+ 937: 
+ 938:     std::fs::create_dir_all(directory).map_err(|_| CryptoError::Io)?;
+ 939:     if file.parent() != Some(directory) {
+ 940:         return Err(CryptoError::Io);
+ 941:     }
+ 942:     write_atomic_encrypted_key_file(file, &encoded, policy.required_file_mode)?;
+ 943:     #[cfg(unix)]
+ 944:     {
+ 945:         use std::os::unix::fs::PermissionsExt;
+ 946:         std::fs::set_permissions(
+ 947:             directory,
+ 948:             std::fs::Permissions::from_mode(policy.required_directory_mode),
+ 949:         )
+ 950:         .map_err(|_| CryptoError::Io)?;
+ 951:         std::fs::set_permissions(
+ 952:             file,
+ 953:             std::fs::Permissions::from_mode(policy.required_file_mode),
+ 954:         )
+ 955:         .map_err(|_| CryptoError::Io)?;
+ 956:     }
+ 957:     validate_key_custody_permissions(directory, file, policy)?;
+ 958:     Ok(())
+ 959: }
+ 960: 
+ 961: fn write_atomic_encrypted_key_file(
+ 962:     path: &Path,
+ 963:     bytes: &[u8],
+ 964:     _mode: u32,
+ 965: ) -> Result<(), CryptoError> {
+ 966:     use std::fs::OpenOptions;
+ 967:     use std::io::Write;
+ 968: 
+ 969:     let parent = path.parent().ok_or(CryptoError::Io)?;
+ 970:     let temp = temp_path_for(path);
+ 971: 
+ 972:     let mut options = OpenOptions::new();
+ 973:     options.write(true).create_new(true);
+ 974:     #[cfg(unix)]
+ 975:     {
+ 976:         use std::os::unix::fs::OpenOptionsExt;
+ 977:         options.mode(_mode);
+ 978:     }
+ 979: 
+ 980:     let mut file = options.open(&temp).map_err(|_| CryptoError::Io)?;
+ 981:     if file.write_all(bytes).is_err() {
+ 982:         let _ = std::fs::remove_file(&temp);
+ 983:         return Err(CryptoError::Io);
+ 984:     }
+ 985:     if file.sync_all().is_err() {
+ 986:         let _ = std::fs::remove_file(&temp);
+ 987:         return Err(CryptoError::Io);
+ 988:     }
+ 989:     if std::fs::rename(&temp, path).is_err() {
+ 990:         let _ = std::fs::remove_file(&temp);
+ 991:         return Err(CryptoError::Io);
+ 992:     }
+ 993: 
+ 994:     // Directory fsync is a no-op on Windows: FlushFileBuffers on a directory
+ 995:     // handle requires special access flags not provided by File::open, and the
+ 996:     // durability guarantee is enforced by the rename above.
+ 997:     #[cfg(unix)]
+ 998:     {
+ 999:         let parent_dir = std::fs::File::open(parent).map_err(|_| CryptoError::Io)?;
+1000:         parent_dir.sync_all().map_err(|_| CryptoError::Io)?;
+1001:     }
+1002:     Ok(())
+1003: }
+1004: 
+1005: fn temp_path_for(path: &Path) -> PathBuf {
+1006:     let mut out = path.as_os_str().to_os_string();
+1007:     let stamp = SystemTime::now()
+1008:         .duration_since(UNIX_EPOCH)
+1009:         .map(|duration| duration.as_nanos())
+1010:         .unwrap_or(0);
+1011:     out.push(format!(".tmp.{}.{}", std::process::id(), stamp));
+1012:     PathBuf::from(out)
+1013: }
+1014: 
+1015: pub fn read_encrypted_key_file(
+1016:     directory: &Path,
+1017:     file: &Path,
+1018:     passphrase: &str,
+1019:     policy: KeyCustodyPermissionPolicy,
+1020: ) -> Result<Vec<u8>, CryptoError> {
+1021:     validate_key_custody_permissions(directory, file, policy)?;
+1022:     let encoded = std::fs::read(file).map_err(|_| CryptoError::Io)?;
+1023:     let blob = decode_encrypted_blob(&encoded)?;
+1024:     decrypt_private_key_envelope(&blob, passphrase)
+1025: }
+1026: 
+1027: fn encode_encrypted_blob(blob: &EncryptedKeyBlob) -> Vec<u8> {
+1028:     let mut out = Vec::with_capacity(16 + 24 + 4 + blob.ciphertext.len());
+1029:     out.extend_from_slice(&blob.salt);
+1030:     out.extend_from_slice(&blob.nonce);
+1031:     out.extend_from_slice(&(blob.ciphertext.len() as u32).to_be_bytes());
+1032:     out.extend_from_slice(&blob.ciphertext);
+1033:     out
+1034: }
+1035: 
+1036: fn decode_encrypted_blob(bytes: &[u8]) -> Result<EncryptedKeyBlob, CryptoError> {
+1037:     if bytes.len() < 44 {
+1038:         return Err(CryptoError::InvalidLength);
+1039:     }
+1040: 
+1041:     let mut salt = [0u8; 16];
+1042:     salt.copy_from_slice(&bytes[0..16]);
+1043:     let mut nonce = [0u8; 24];
+1044:     nonce.copy_from_slice(&bytes[16..40]);
+1045: 
+1046:     let mut length_bytes = [0u8; 4];
+1047:     length_bytes.copy_from_slice(&bytes[40..44]);
+1048:     let ciphertext_len = u32::from_be_bytes(length_bytes) as usize;
+1049:     if bytes.len() != 44 + ciphertext_len {
+1050:         return Err(CryptoError::InvalidLength);
+1051:     }
+1052: 
+1053:     Ok(EncryptedKeyBlob {
+1054:         salt,
+1055:         nonce,
+1056:         ciphertext: bytes[44..].to_vec(),
+1057:     })
+1058: }
+1059: 
+1060: #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+1061: pub struct KeyCustodyPermissionPolicy {
+1062:     pub required_directory_mode: u32,
+1063:     pub required_file_mode: u32,
+1064: }
+1065: 
+1066: impl Default for KeyCustodyPermissionPolicy {
+1067:     fn default() -> Self {
+1068:         Self {
+1069:             required_directory_mode: 0o700,
+1070:             required_file_mode: 0o600,
+1071:         }
+1072:     }
+1073: }
+1074: 
+1075: pub fn validate_key_custody_permissions(
+1076:     directory: &Path,
+1077:     file: &Path,
+1078:     policy: KeyCustodyPermissionPolicy,
+1079: ) -> Result<(), CryptoError> {
+1080:     #[cfg(unix)]
+1081:     {
+1082:         use std::os::unix::fs::PermissionsExt;
+1083: 
+1084:         let directory_link_metadata =
+1085:             std::fs::symlink_metadata(directory).map_err(|_| CryptoError::Io)?;
+1086:         if directory_link_metadata.file_type().is_symlink() || !directory_link_metadata.is_dir() {
+1087:             return Err(CryptoError::PermissionDenied);
+1088:         }
+1089:         let file_link_metadata = std::fs::symlink_metadata(file).map_err(|_| CryptoError::Io)?;
+1090:         if file_link_metadata.file_type().is_symlink() || !file_link_metadata.is_file() {
+1091:             return Err(CryptoError::PermissionDenied);
+1092:         }
+1093: 
+1094:         let directory_metadata = std::fs::metadata(directory).map_err(|_| CryptoError::Io)?;
+1095:         let file_metadata = std::fs::metadata(file).map_err(|_| CryptoError::Io)?;
+1096: 
+1097:         let directory_mode = directory_metadata.permissions().mode() & 0o777;
+1098:         let file_mode = file_metadata.permissions().mode() & 0o777;
+1099: 
+1100:         if directory_mode != policy.required_directory_mode {
+1101:             return Err(CryptoError::PermissionDenied);
+1102:         }
+1103:         if file_mode != policy.required_file_mode {
+1104:             return Err(CryptoError::PermissionDenied);
+1105:         }
+1106: 
+1107:         Ok(())
+1108:     }
+1109: 
+1110:     #[cfg(not(unix))]
+1111:     {
+1112:         // Windows ACL validation not yet implemented; defer to OS enforcement.
+1113:         let _ = (directory, file, policy);
+1114:         Ok(())
+1115:     }
+1116: }
+1117: 
+1118: #[cfg(test)]
+1119: mod tests {
+1120:     use super::{
+1121:         AlgorithmPolicy, CompatibilityException, CryptoAlgorithm, CryptoError,
+1122:         Ed25519SigningProvider, KeyCustodyManager, KeyCustodyPermissionPolicy, NoOsSecureStore,
+1123:         NodeKeyPair, OsStoreFallbackPolicy, SigningProviderKind, SigningProviderPolicy,
+1124:         create_provider_attestation, decrypt_private_key_envelope, encrypt_private_key_envelope,
+1125:         generate_key_custody_material, read_encrypted_key_file, validate_key_custody_permissions,
+1126:         validate_signing_provider_policy, verify_provider_attestation, write_encrypted_key_file,
+1127:     };
+1128: 
+1129:     #[test]
+1130:     fn rejects_zero_key_material() {
+1131:         let result = NodeKeyPair::from_raw([0; 32], [0; 32]);
+1132:         assert_eq!(result.err(), Some(CryptoError::WeakMaterial));
+1133:     }
+1134: 
+1135:     #[test]
+1136:     fn accepts_nonzero_key_material() {
+1137:         let result = NodeKeyPair::from_raw([7; 32], [9; 32]);
+1138:         assert!(result.is_ok());
+1139:     }
+1140: 
+1141:     #[test]
+1142:     fn allowlisted_algorithm_is_accepted() {
+1143:         let policy = AlgorithmPolicy::default();
+1144:         let result = policy.validate(CryptoAlgorithm::Tls13, 0);
+1145:         assert!(result.is_ok());
+1146:     }
+1147: 
+1148:     #[test]
+1149:     fn denylisted_algorithm_is_rejected_without_exception() {
+1150:         let policy = AlgorithmPolicy::default();
+1151:         let result = policy.validate(CryptoAlgorithm::Sha1, 100);
+1152:         assert_eq!(result.err(), Some(CryptoError::DeniedAlgorithm));
+1153:     }
+1154: 
+1155:     #[test]
+1156:     fn denylisted_algorithm_exceptions_are_rejected() {
+1157:         let result = AlgorithmPolicy::with_exceptions(vec![CompatibilityException {
+1158:             algorithm: CryptoAlgorithm::Sha1,
+1159:             expires_unix_seconds: 200,
+1160:         }]);
+1161:         assert_eq!(result.err(), Some(CryptoError::InvalidException));
+1162:     }
+1163: 
+1164:     #[test]
+1165:     fn denylisted_algorithm_remains_denied_without_exceptions() {
+1166:         let policy = AlgorithmPolicy::default();
+1167:         let result = policy.validate(CryptoAlgorithm::Sha1, 201);
+1168:         assert_eq!(result.err(), Some(CryptoError::DeniedAlgorithm));
+1169:     }
+1170: 
+1171:     #[test]
+1172:     fn invalid_exception_for_allowlisted_algorithm_is_rejected() {
+1173:         let result = AlgorithmPolicy::with_exceptions(vec![CompatibilityException {
+1174:             algorithm: CryptoAlgorithm::Tls13,
+1175:             expires_unix_seconds: 200,
+1176:         }]);
+1177: 
+1178:         assert_eq!(result.err(), Some(CryptoError::InvalidException));
+1179:     }
+1180: 
+1181:     #[test]
+1182:     fn encrypted_envelope_roundtrip_succeeds() {
+1183:         let (salt, nonce) = generate_key_custody_material();
+1184:         let blob =
+1185:             encrypt_private_key_envelope(b"private-material", "phase2-passphrase", salt, nonce)
+1186:                 .expect("encryption should succeed");
+1187: 
+1188:         let plaintext = decrypt_private_key_envelope(&blob, "phase2-passphrase")
+1189:             .expect("decryption should succeed");
+1190:         assert_eq!(plaintext, b"private-material");
+1191:     }
+1192: 
+1193:     #[test]
+1194:     fn encrypted_envelope_rejects_wrong_passphrase() {
+1195:         let (salt, nonce) = generate_key_custody_material();
+1196:         let blob =
+1197:             encrypt_private_key_envelope(b"private-material", "phase2-passphrase", salt, nonce)
+1198:                 .expect("encryption should succeed");
+1199: 
+1200:         let result = decrypt_private_key_envelope(&blob, "wrong-passphrase");
+1201:         assert_eq!(result.err(), Some(CryptoError::DecryptionFailed));
+1202:     }
+1203: 
+1204:     #[cfg(unix)]
+1205:     #[test]
+1206:     fn validates_strict_key_custody_permissions() {
+1207:         use std::os::unix::fs::PermissionsExt;
+1208: 
+1209:         let unique = format!(
+1210:             "rustynet-crypto-permission-test-{}",
+1211:             std::time::SystemTime::now()
+1212:                 .duration_since(std::time::UNIX_EPOCH)
+1213:                 .expect("clock should be valid")
+1214:                 .as_nanos()
+1215:         );
+1216:         let temp_dir = std::env::temp_dir().join(unique);
+1217:         let key_file = temp_dir.join("node-key.enc");
+1218: 
+1219:         std::fs::create_dir_all(&temp_dir).expect("temp directory should be created");
+1220:         std::fs::write(&key_file, b"ciphertext").expect("key file should be written");
+1221: 
+1222:         std::fs::set_permissions(&temp_dir, std::fs::Permissions::from_mode(0o700))
+1223:             .expect("directory mode should be set");
+1224:         std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600))
+1225:             .expect("file mode should be set");
+1226: 
+1227:         let validation = validate_key_custody_permissions(
+1228:             &temp_dir,
+1229:             &key_file,
+1230:             KeyCustodyPermissionPolicy::default(),
+1231:         );
+1232: 
+1233:         assert!(validation.is_ok());
+1234:         let _ = std::fs::remove_file(&key_file);
+1235:         let _ = std::fs::remove_dir(&temp_dir);
+1236:     }
+1237: 
+1238:     #[cfg(unix)]
+1239:     #[test]
+1240:     fn rejects_weak_key_custody_permissions() {
+1241:         use std::os::unix::fs::PermissionsExt;
+1242: 
+1243:         let unique = format!(
+1244:             "rustynet-crypto-permission-test-weak-{}",
+1245:             std::time::SystemTime::now()
+1246:                 .duration_since(std::time::UNIX_EPOCH)
+1247:                 .expect("clock should be valid")
+1248:                 .as_nanos()
+1249:         );
+1250:         let temp_dir = std::env::temp_dir().join(unique);
+1251:         let key_file = temp_dir.join("node-key.enc");
+1252: 
+1253:         std::fs::create_dir_all(&temp_dir).expect("temp directory should be created");
+1254:         std::fs::write(&key_file, b"ciphertext").expect("key file should be written");
+1255: 
+1256:         std::fs::set_permissions(&temp_dir, std::fs::Permissions::from_mode(0o755))
+1257:             .expect("directory mode should be set");
+1258:         std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o644))
+1259:             .expect("file mode should be set");
+1260: 
+1261:         let validation = validate_key_custody_permissions(
+1262:             &temp_dir,
+1263:             &key_file,
+1264:             KeyCustodyPermissionPolicy::default(),
+1265:         );
+1266: 
+1267:         assert_eq!(validation.err(), Some(CryptoError::PermissionDenied));
+1268:         let _ = std::fs::remove_file(&key_file);
+1269:         let _ = std::fs::remove_dir(&temp_dir);
+1270:     }
+1271: 
+1272:     #[cfg(unix)]
+1273:     #[test]
+1274:     fn encrypted_key_file_roundtrip_with_permission_checks() {
+1275:         let unique = format!(
+1276:             "rustynet-encrypted-key-file-{}",
+1277:             std::time::SystemTime::now()
+1278:                 .duration_since(std::time::UNIX_EPOCH)
+1279:                 .expect("clock should be valid")
+1280:                 .as_nanos()
+1281:         );
+1282:         let directory = std::env::temp_dir().join(unique);
+1283:         let file = directory.join("node-key.enc");
+1284: 
+1285:         write_encrypted_key_file(
+1286:             &directory,
+1287:             &file,
+1288:             b"very-secret-private-key",
+1289:             "phase2-passphrase",
+1290:             KeyCustodyPermissionPolicy::default(),
+1291:         )
+1292:         .expect("write should succeed");
+1293: 
+1294:         let plaintext = read_encrypted_key_file(
+1295:             &directory,
+1296:             &file,
+1297:             "phase2-passphrase",
+1298:             KeyCustodyPermissionPolicy::default(),
+1299:         )
+1300:         .expect("read should succeed");
+1301: 
+1302:         assert_eq!(plaintext, b"very-secret-private-key");
+1303: 
+1304:         let wrong = read_encrypted_key_file(
+1305:             &directory,
+1306:             &file,
+1307:             "wrong-passphrase",
+1308:             KeyCustodyPermissionPolicy::default(),
+1309:         );
+1310:         assert_eq!(wrong.err(), Some(CryptoError::DecryptionFailed));
+1311: 
+1312:         let _ = std::fs::remove_file(&file);
+1313:         let _ = std::fs::remove_dir(&directory);
+1314:     }
+1315: 
+1316:     #[cfg(unix)]
+1317:     #[test]
+1318:     fn key_custody_manager_falls_back_when_os_store_unavailable() {
+1319:         let unique = format!(
+1320:             "rustynet-key-custody-manager-{}",
+1321:             std::time::SystemTime::now()
+1322:                 .duration_since(std::time::UNIX_EPOCH)
+1323:                 .expect("clock should be valid")
+1324:                 .as_nanos()
+1325:         );
+1326:         let fallback_directory = std::env::temp_dir().join(unique);
+1327:         let manager = KeyCustodyManager::new(
+1328:             NoOsSecureStore,
+1329:             fallback_directory.clone(),
+1330:             "phase2-passphrase".to_string(),
+1331:             KeyCustodyPermissionPolicy::default(),
+1332:         );
+1333: 
+1334:         let backend = manager
+1335:             .store_private_key("node_identity", b"node-private-key")
+1336:             .expect("fallback storage should succeed");
+1337:         assert_eq!(backend, super::KeyCustodyBackend::EncryptedFileFallback);
+1338: 
+1339:         let loaded = manager
+1340:             .load_private_key("node_identity")
+1341:             .expect("fallback read should succeed");
+1342:         assert_eq!(loaded, b"node-private-key");
+1343: 
+1344:         let key_file = fallback_directory.join("node_identity.enc");
+1345:         let _ = std::fs::remove_file(key_file);
+1346:         let _ = std::fs::remove_dir(fallback_directory);
+1347:     }
+1348: 
+1349:     #[cfg(unix)]
+1350:     #[test]
+1351:     fn key_custody_manager_strict_mode_rejects_encrypted_file_fallback() {
+1352:         let unique = format!(
+1353:             "rustynet-key-custody-manager-strict-{}",
+1354:             std::time::SystemTime::now()
+1355:                 .duration_since(std::time::UNIX_EPOCH)
+1356:                 .expect("clock should be valid")
+1357:                 .as_nanos()
+1358:         );
+1359:         let fallback_directory = std::env::temp_dir().join(unique);
+1360:         let manager = KeyCustodyManager::new(
+1361:             NoOsSecureStore,
+1362:             fallback_directory.clone(),
+1363:             "phase2-passphrase".to_string(),
+1364:             KeyCustodyPermissionPolicy::default(),
+1365:         )
+1366:         .with_fallback_policy(OsStoreFallbackPolicy::RequireOsSecureStore);
+1367: 
+1368:         let store_result = manager.store_private_key("node_identity", b"node-private-key");
+1369:         assert_eq!(store_result.err(), Some(CryptoError::OsStoreUnavailable));
+1370:         assert!(!fallback_directory.join("node_identity.enc").exists());
+1371: 
+1372:         let load_result = manager.load_private_key("node_identity");
+1373:         assert_eq!(load_result.err(), Some(CryptoError::OsStoreUnavailable));
+1374: 
+1375:         let _ = std::fs::remove_dir(fallback_directory);
+1376:     }
+1377: 
+1378:     #[cfg(unix)]
+1379:     #[test]
+1380:     fn rejects_symlink_key_file_permissions() {
+1381:         use std::os::unix::fs::symlink;
+1382: 
+1383:         let unique = format!(
+1384:             "rustynet-key-custody-symlink-{}",
+1385:             std::time::SystemTime::now()
+1386:                 .duration_since(std::time::UNIX_EPOCH)
+1387:                 .expect("clock should be valid")
+1388:                 .as_nanos()
+1389:         );
+1390:         let directory = std::env::temp_dir().join(unique);
+1391:         let target = directory.join("node-key.target");
+1392:         let file = directory.join("node-key.enc");
+1393: 
+1394:         std::fs::create_dir_all(&directory).expect("directory should be created");
+1395:         std::fs::write(&target, b"ciphertext").expect("target should be written");
+1396:         symlink(&target, &file).expect("symlink should be created");
+1397: 
+1398:         let result = validate_key_custody_permissions(
+1399:             &directory,
+1400:             &file,
+1401:             KeyCustodyPermissionPolicy::default(),
+1402:         );
+1403:         assert_eq!(result.err(), Some(CryptoError::PermissionDenied));
+1404: 
+1405:         let _ = std::fs::remove_file(&file);
+1406:         let _ = std::fs::remove_file(&target);
+1407:         let _ = std::fs::remove_dir(&directory);
+1408:     }
+1409: 
+1410:     #[test]
+1411:     fn key_custody_manager_rejects_invalid_key_identifier() {
+1412:         let manager = KeyCustodyManager::new(
+1413:             NoOsSecureStore,
+1414:             std::env::temp_dir().join("rustynet-key-custody-invalid-id"),
+1415:             "phase2-passphrase".to_string(),
+1416:             KeyCustodyPermissionPolicy::default(),
+1417:         );
+1418: 
+1419:         let result = manager.store_private_key("bad/key", b"node-private-key");
+1420:         assert_eq!(result.err(), Some(CryptoError::InvalidLength));
+1421:     }
+1422: 
+1423:     #[test]
+1424:     fn signing_provider_policy_requires_hardware_primary() {
+1425:         let result = validate_signing_provider_policy(
+1426:             SigningProviderKind::LocalEncryptedFile,
+1427:             Some(SigningProviderKind::Kms),
+1428:             SigningProviderPolicy {
+1429:                 require_hardware_backed_primary: true,
+1430:                 allow_local_fallback: true,
+1431:             },
+1432:         );
+1433:         assert_eq!(result.err(), Some(CryptoError::UnsupportedProviderPolicy));
+1434:     }
+1435: 
+1436:     #[test]
+1437:     fn provider_attestation_roundtrip_verifies() {
+1438:         let provider = Ed25519SigningProvider::from_seed(
+1439:             SigningProviderKind::Kms,
+1440:             "kms://rustynet/signing-key",
+1441:             [7; 32],
+1442:         );
+1443:         let payload = b"release-artifact-digest";
+1444:         let attestation =
+1445:             create_provider_attestation(&provider, payload).expect("attestation should be created");
+1446: 
+1447:         verify_provider_attestation(&provider, payload, &attestation)
+1448:             .expect("attestation should verify");
+1449: 
+1450:         let bad_result = verify_provider_attestation(&provider, b"tampered", &attestation);
+1451:         assert_eq!(
+1452:             bad_result.err(),
+1453:             Some(CryptoError::AttestationVerificationFailed)
+1454:         );
+1455:     }
+1456: 
+1457:     #[test]
+1458:     fn provider_attestation_rejects_wrong_signing_key() {
+1459:         let source = Ed25519SigningProvider::from_seed(
+1460:             SigningProviderKind::Kms,
+1461:             "kms://rustynet/signing-key",
+1462:             [7; 32],
+1463:         );
+1464:         let payload = b"release-artifact-digest";
+1465:         let attestation =
+1466:             create_provider_attestation(&source, payload).expect("attestation should be created");
+1467: 
+1468:         let wrong_provider = Ed25519SigningProvider::from_seed(
+1469:             SigningProviderKind::Kms,
+1470:             "kms://rustynet/signing-key",
+1471:             [9; 32],
+1472:         );
+1473:         let verification = verify_provider_attestation(&wrong_provider, payload, &attestation);
+1474:         assert_eq!(
+1475:             verification.err(),
+1476:             Some(CryptoError::AttestationVerificationFailed)
+1477:         );
+1478:     }
+1479: 
+1480:     #[test]
+1481:     fn secret_key_ct_eq_same_local() {
+1482:         let a = super::SecretKey([1u8; 32]);
+1483:         let b = super::SecretKey([1u8; 32]);
+1484:         assert_eq!(a.ct_eq(&b).unwrap_u8(), 1);
+1485:     }
+1486: 
+1487:     #[test]
+1488:     fn secret_key_ct_eq_different_local() {
+1489:         let a = super::SecretKey([1u8; 32]);
+1490:         let mut b = [1u8; 32];
+1491:         b[0] = 2;
+1492:         let b = super::SecretKey(b);
+1493:         assert_eq!(a.ct_eq(&b).unwrap_u8(), 0);
+1494:     }
+1495: }
+
+===== /crates/rustynet-crypto/.gitignore =====
+
+   1: /target
+
+===== /crates/rustynet-crypto/Cargo.toml =====
+
+   1: [package]
+   2: name = "rustynet-crypto"
+   3: version.workspace = true
+   4: edition.workspace = true
+   5: license.workspace = true
+   6: authors.workspace = true
+   7: 
+   8: [dependencies]
+   9: argon2 = "0.5"
+  10: chacha20poly1305 = "0.10"
+  11: rand.workspace = true
+  12: sha2 = "0.10"
+  13: subtle = "2"
+  14: ed25519-dalek = "2"
+  15: zeroize = "1"
+  16: rustynet-windows-native = { path = "../rustynet-windows-native" }
+  17: 
+  18: [target.'cfg(target_os = "macos")'.dependencies]
+  19: security-framework = "3.7"
+

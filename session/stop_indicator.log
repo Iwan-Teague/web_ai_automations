@@ -1,0 +1,40 @@
+
+thread 'main' (14119944) panicked at library/core/src/panicking.rs:225:5:
+panic in a function that cannot unwind
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread caused non-unwinding panic. aborting.
+
+thread 'main' (14120150) panicked at library/core/src/panicking.rs:225:5:
+panic in a function that cannot unwind
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread caused non-unwinding panic. aborting.
+
+thread 'main' (14120252) panicked at library/core/src/panicking.rs:225:5:
+panic in a function that cannot unwind
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread caused non-unwinding panic. aborting.
+
+thread 'main' (14120718) panicked at library/core/src/panicking.rs:225:5:
+panic in a function that cannot unwind
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread caused non-unwinding panic. aborting.
+
+thread 'main' (14120898) panicked at library/core/src/panicking.rs:225:5:
+panic in a function that cannot unwind
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread caused non-unwinding panic. aborting.
+
+thread 'main' (14120930) panicked at library/core/src/panicking.rs:225:5:
+panic in a function that cannot unwind
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread caused non-unwinding panic. aborting.
+
+thread 'main' (14120946) panicked at library/core/src/panicking.rs:225:5:
+panic in a function that cannot unwind
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread caused non-unwinding panic. aborting.
+
+thread 'main' (14120968) panicked at library/core/src/panicking.rs:225:5:
+panic in a function that cannot unwind
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread caused non-unwinding panic. aborting.
