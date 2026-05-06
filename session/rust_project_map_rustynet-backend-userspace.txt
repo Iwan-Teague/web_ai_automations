@@ -1,0 +1,468 @@
+# Rust Project Map — rustynet-backend-userspace
+
+Root: /Users/iwan/Desktop/Rustynet
+Captured: 2026-05-06T15:06:09+01:00
+Git: branch `main` @ 8a9c3eab12fe  ·  uncommitted files: 0
+Files: 3  ·  Lines of source: 425
+
+## Crate Dependencies (within this workspace)
+
+Depends on (workspace): rustynet-backend-api, rustynet-backend-wireguard
+Depended on by (workspace): (none — top-level crate)
+
+## Public API Surface
+
+2 public items across 1 file(s).
+
+/crates/rustynet-backend-userspace/src/lib.rs
+  L   29  pub struct UserspaceBackend
+  L   46  pub fn new(
+
+
+## Document Tree
+
+`-- crates
+    `-- rustynet-backend-userspace
+        |-- Cargo.toml  (15 lines)
+        |-- src
+        |   `-- lib.rs  (195 lines)  — Boringtun userspace WireGuard backend for Rustynet.
+        `-- tests
+            `-- userspace_conformance.rs  (215 lines)  — TunnelBackend conformance suite run against UserspaceBackend.
+
+
+## Files
+
+===== /crates/rustynet-backend-userspace/src/lib.rs =====
+
+   1: //! Boringtun userspace WireGuard backend for Rustynet.
+   2: //!
+   3: //! Provides [`UserspaceBackend`], a second non-kernel TunnelBackend
+   4: //! implementation that drives WireGuard entirely in userspace via the
+   5: //! vendored boringtun noise engine. The kernel WireGuard module is not
+   6: //! required; this backend can run on hosts where wg(8) is unavailable.
+   7: //!
+   8: //! On Linux this wraps [`LinuxUserspaceSharedBackend`] from
+   9: //! `rustynet-backend-wireguard`. On other platforms the type is present but
+  10: //! all operations fail with a clear `Internal` error so callers can detect
+  11: //! platform capability at runtime rather than compile time.
+  12: 
+  13: #![forbid(unsafe_code)]
+  14: 
+  15: use rustynet_backend_api::{
+  16:     BackendCapabilities, BackendError, ExitMode, NodeId, PeerConfig, Route, RuntimeContext,
+  17:     SocketEndpoint, TunnelBackend, TunnelStats,
+  18: };
+  19: 
+  20: #[cfg(target_os = "linux")]
+  21: use rustynet_backend_wireguard::LinuxUserspaceSharedBackend;
+  22: 
+  23: /// A boringtun-driven userspace WireGuard backend.
+  24: ///
+  25: /// On Linux this delegates all operations to
+  26: /// [`LinuxUserspaceSharedBackend`]. On other platforms every mutating
+  27: /// call returns a `BackendError::internal` with a platform-unavailable
+  28: /// message.
+  29: pub struct UserspaceBackend {
+  30:     #[cfg(target_os = "linux")]
+  31:     inner: LinuxUserspaceSharedBackend,
+  32:     #[cfg(not(target_os = "linux"))]
+  33:     _marker: (),
+  34: }
+  35: 
+  36: impl UserspaceBackend {
+  37:     /// Construct a userspace backend for the given WireGuard interface.
+  38:     ///
+  39:     /// # Arguments
+  40:     /// * `interface_name` – TUN interface name (e.g. `"rustynet0"`).
+  41:     /// * `private_key_path` – Path to a base64-encoded WireGuard private key.
+  42:     /// * `listen_port` – UDP port the userspace engine should bind.
+  43:     ///
+  44:     /// Returns an error if the platform does not support this backend or if
+  45:     /// the constructor arguments are invalid.
+  46:     pub fn new(
+  47:         interface_name: impl Into<String>,
+  48:         private_key_path: impl Into<String>,
+  49:         listen_port: u16,
+  50:     ) -> Result<Self, BackendError> {
+  51:         #[cfg(target_os = "linux")]
+  52:         {
+  53:             let inner = LinuxUserspaceSharedBackend::new(
+  54:                 interface_name,
+  55:                 private_key_path,
+  56:                 listen_port,
+  57:             )?;
+  58:             return Ok(Self { inner });
+  59:         }
+  60:         #[cfg(not(target_os = "linux"))]
+  61:         {
+  62:             let _ = (interface_name, private_key_path, listen_port);
+  63:             Err(BackendError::internal(
+  64:                 "UserspaceBackend is only available on Linux",
+  65:             ))
+  66:         }
+  67:     }
+  68: }
+  69: 
+  70: #[cfg(not(target_os = "linux"))]
+  71: fn platform_unavailable() -> BackendError {
+  72:     BackendError::internal("UserspaceBackend is only available on Linux")
+  73: }
+  74: 
+  75: impl TunnelBackend for UserspaceBackend {
+  76:     fn name(&self) -> &'static str {
+  77:         "userspace-wireguard"
+  78:     }
+  79: 
+  80:     fn capabilities(&self) -> BackendCapabilities {
+  81:         #[cfg(target_os = "linux")]
+  82:         return self.inner.capabilities();
+  83:         #[cfg(not(target_os = "linux"))]
+  84:         BackendCapabilities {
+  85:             supports_roaming: false,
+  86:             supports_exit_nodes: false,
+  87:             supports_lan_routes: false,
+  88:             supports_ipv6: false,
+  89:         }
+  90:     }
+  91: 
+  92:     fn start(&mut self, context: RuntimeContext) -> Result<(), BackendError> {
+  93:         #[cfg(target_os = "linux")]
+  94:         return self.inner.start(context);
+  95:         #[cfg(not(target_os = "linux"))]
+  96:         {
+  97:             let _ = context;
+  98:             Err(platform_unavailable())
+  99:         }
+ 100:     }
+ 101: 
+ 102:     fn configure_peer(&mut self, peer: PeerConfig) -> Result<(), BackendError> {
+ 103:         #[cfg(target_os = "linux")]
+ 104:         return self.inner.configure_peer(peer);
+ 105:         #[cfg(not(target_os = "linux"))]
+ 106:         {
+ 107:             let _ = peer;
+ 108:             Err(platform_unavailable())
+ 109:         }
+ 110:     }
+ 111: 
+ 112:     fn update_peer_endpoint(
+ 113:         &mut self,
+ 114:         node_id: &NodeId,
+ 115:         endpoint: SocketEndpoint,
+ 116:     ) -> Result<(), BackendError> {
+ 117:         #[cfg(target_os = "linux")]
+ 118:         return self.inner.update_peer_endpoint(node_id, endpoint);
+ 119:         #[cfg(not(target_os = "linux"))]
+ 120:         {
+ 121:             let _ = (node_id, endpoint);
+ 122:             Err(platform_unavailable())
+ 123:         }
+ 124:     }
+ 125: 
+ 126:     fn current_peer_endpoint(
+ 127:         &self,
+ 128:         node_id: &NodeId,
+ 129:     ) -> Result<Option<SocketEndpoint>, BackendError> {
+ 130:         #[cfg(target_os = "linux")]
+ 131:         return self.inner.current_peer_endpoint(node_id);
+ 132:         #[cfg(not(target_os = "linux"))]
+ 133:         {
+ 134:             let _ = node_id;
+ 135:             Err(platform_unavailable())
+ 136:         }
+ 137:     }
+ 138: 
+ 139:     fn peer_latest_handshake_unix(
+ 140:         &mut self,
+ 141:         node_id: &NodeId,
+ 142:     ) -> Result<Option<u64>, BackendError> {
+ 143:         #[cfg(target_os = "linux")]
+ 144:         return self.inner.peer_latest_handshake_unix(node_id);
+ 145:         #[cfg(not(target_os = "linux"))]
+ 146:         {
+ 147:             let _ = node_id;
+ 148:             Err(platform_unavailable())
+ 149:         }
+ 150:     }
+ 151: 
+ 152:     fn remove_peer(&mut self, node_id: &NodeId) -> Result<(), BackendError> {
+ 153:         #[cfg(target_os = "linux")]
+ 154:         return self.inner.remove_peer(node_id);
+ 155:         #[cfg(not(target_os = "linux"))]
+ 156:         {
+ 157:             let _ = node_id;
+ 158:             Err(platform_unavailable())
+ 159:         }
+ 160:     }
+ 161: 
+ 162:     fn apply_routes(&mut self, routes: Vec<Route>) -> Result<(), BackendError> {
+ 163:         #[cfg(target_os = "linux")]
+ 164:         return self.inner.apply_routes(routes);
+ 165:         #[cfg(not(target_os = "linux"))]
+ 166:         {
+ 167:             let _ = routes;
+ 168:             Err(platform_unavailable())
+ 169:         }
+ 170:     }
+ 171: 
+ 172:     fn set_exit_mode(&mut self, mode: ExitMode) -> Result<(), BackendError> {
+ 173:         #[cfg(target_os = "linux")]
+ 174:         return self.inner.set_exit_mode(mode);
+ 175:         #[cfg(not(target_os = "linux"))]
+ 176:         {
+ 177:             let _ = mode;
+ 178:             Err(platform_unavailable())
+ 179:         }
+ 180:     }
+ 181: 
+ 182:     fn stats(&self) -> Result<TunnelStats, BackendError> {
+ 183:         #[cfg(target_os = "linux")]
+ 184:         return self.inner.stats();
+ 185:         #[cfg(not(target_os = "linux"))]
+ 186:         Err(platform_unavailable())
+ 187:     }
+ 188: 
+ 189:     fn shutdown(&mut self) -> Result<(), BackendError> {
+ 190:         #[cfg(target_os = "linux")]
+ 191:         return self.inner.shutdown();
+ 192:         #[cfg(not(target_os = "linux"))]
+ 193:         Err(platform_unavailable())
+ 194:     }
+ 195: }
+
+===== /crates/rustynet-backend-userspace/Cargo.toml =====
+
+   1: [package]
+   2: name = "rustynet-backend-userspace"
+   3: version.workspace = true
+   4: edition.workspace = true
+   5: license.workspace = true
+   6: authors.workspace = true
+   7: description = "Boringtun userspace WireGuard backend for Rustynet"
+   8: 
+   9: [dependencies]
+  10: rustynet-backend-api = { path = "../rustynet-backend-api" }
+  11: rustynet-backend-wireguard = { path = "../rustynet-backend-wireguard" }
+  12: 
+  13: [dev-dependencies]
+  14: base64 = "0.22"
+  15: tempfile = "3"
+
+===== /crates/rustynet-backend-userspace/tests/userspace_conformance.rs =====
+
+   1: //! TunnelBackend conformance suite run against UserspaceBackend.
+   2: //!
+   3: //! On Linux, UserspaceBackend delegates to LinuxUserspaceSharedBackend which
+   4: //! requires a real TUN device and a valid private key file. Tests that need a
+   5: //! live engine are gated behind a well-known env var
+   6: //! (RUSTYNET_USERSPACE_CONFORMANCE_KEY) so they can be skipped in CI
+   7: //! environments without TUN capability.
+   8: //!
+   9: //! Platform invariant tests (capability advertisement, constructor error
+  10: //! handling) run unconditionally on all platforms.
+  11: 
+  12: #![forbid(unsafe_code)]
+  13: 
+  14: use rustynet_backend_api::BackendErrorKind;
+  15: use rustynet_backend_userspace::UserspaceBackend;
+  16: 
+  17: // ── Platform-invariant tests ───
+  18: 
+  19: #[test]
+  20: fn userspace_backend_name_is_stable() {
+  21: 
+  22:     // On non-Linux the constructor returns an error; verify the name is
+  23:     // accessible from a successfully-constructed instance only on Linux, and
+  24:     // verify the error type on other platforms.
+  25:     #[cfg(target_os = "linux")]
+  26:     {
+  27:         // Use a guaranteed-invalid key path so the constructor rejects it
+  28:         // without touching the network — we still get a valid error type.
+  29:         let result = UserspaceBackend::new("rustynet0", "/nonexistent/key.key", 51820);
+  30:         match result {
+  31:             Ok(mut b) => {
+  32:                 assert_eq!(b.name(), "userspace-wireguard");
+  33:                 let _ = b.shutdown();
+  34:             }
+  35:             Err(e) => {
+  36:                 assert_eq!(
+  37:                     e.kind,
+  38:                     BackendErrorKind::InvalidInput,
+  39:                     "invalid key path should return InvalidInput, got: {e}"
+  40:                 );
+  41:             }
+  42:         }
+  43:     }
+  44: 
+  45:     #[cfg(not(target_os = "linux"))]
+  46:     {
+  47:         let result = UserspaceBackend::new("rustynet0", "/any/key", 51820);
+  48:         assert!(
+  49:             result.is_err(),
+  50:             "UserspaceBackend must fail on non-Linux platform"
+  51:         );
+  52:         let err = result.err().expect("already asserted is_err");
+  53:         assert_eq!(err.kind, BackendErrorKind::Internal);
+  54:     }
+  55: }
+  56: 
+  57: #[test]
+  58: fn userspace_backend_capabilities_struct_is_well_formed() {
+  59:     // Capabilities is available even without starting; on Linux we can
+  60:     // inspect it from a constructed instance; on non-Linux we verify the
+  61:     // platform error path.
+  62:     #[cfg(target_os = "linux")]
+  63:     {
+  64:         let result = UserspaceBackend::new("rustynet0", "/nonexistent/key.key", 51820);
+  65:         if let Ok(b) = result {
+  66:             let _ = b.capabilities();
+  67:         }
+  68:     }
+  69: 
+  70:     #[cfg(not(target_os = "linux"))]
+  71:     {
+  72:         let result = UserspaceBackend::new("rustynet0", "/any/key", 51820);
+  73:         assert!(result.is_err(), "non-Linux must reject construction");
+  74:         let err = result.err().expect("already asserted is_err");
+  75:         assert_eq!(err.kind, BackendErrorKind::Internal);
+  76:     }
+  77: }
+  78: 
+  79: // ── Linux TUN-capable conformance (opt-in via env var) ───
+  80: 
+  81: /// Returns the private key path from RUSTYNET_USERSPACE_CONFORMANCE_KEY if
+  82: /// set and the file exists, otherwise None (test is skipped).
+  83: #[cfg(target_os = "linux")]
+  84: fn conformance_key_path() -> Option<std::path::PathBuf> {
+  85:     let path = std::path::PathBuf::from(
+  86:         std::env::var("RUSTYNET_USERSPACE_CONFORMANCE_KEY").ok()?,
+  87:     );
+  88:     if path.exists() { Some(path) } else { None }
+  89: }
+  90: 
+  91: #[cfg(target_os = "linux")]
+  92: fn make_backend(key_path: &std::path::Path) -> UserspaceBackend {
+  93:     UserspaceBackend::new(
+  94:         "rustynet-test0",
+  95:         key_path.to_str().expect("key path must be valid utf-8"),
+  96:         59820,
+  97:     )
+  98:     .expect("UserspaceBackend should construct from a valid key on Linux")
+  99: }
+ 100: 
+ 101: #[test]
+ 102: #[cfg(target_os = "linux")]
+ 103: fn userspace_backend_tun_conformance_requires_env() {
+ 104:     let Some(key_path) = conformance_key_path() else {
+ 105:         // No key provided — skip. This is expected in CI without TUN.
+ 106:         return;
+ 107:     };
+ 108: 
+ 109:     use rustynet_backend_api::{
+ 110:         ExitMode, NodeId, PeerConfig, Route, RouteKind, RuntimeContext, SocketEndpoint,
+ 111:         TunnelBackend,
+ 112:     };
+ 113:     use std::net::{IpAddr, Ipv4Addr};
+ 114: 
+ 115:     let ctx = RuntimeContext {
+ 116:         local_node: NodeId::new("userspace-test-node").expect("valid node id"),
+ 117:         interface_name: "rustynet-test0".to_string(),
+ 118:         mesh_cidr: "100.64.0.0/10".to_string(),
+ 119:         local_cidr: "100.64.0.1/32".to_string(),
+ 120:     };
+ 121: 
+ 122:     let sample_peer = PeerConfig {
+ 123:         node_id: NodeId::new("remote-peer").expect("valid node id"),
+ 124:         endpoint: SocketEndpoint {
+ 125:             addr: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)),
+ 126:             port: 51820,
+ 127:         },
+ 128:         public_key: [7u8; 32],
+ 129:         allowed_ips: vec!["100.64.1.0/24".to_string()],
+ 130:     };
+ 131: 
+ 132:     let mut backend = make_backend(&key_path);
+ 133:     assert_eq!(backend.name(), "userspace-wireguard");
+ 134: 
+ 135:     backend.start(ctx).expect("start should succeed");
+ 136: 
+ 137:     backend
+ 138:         .configure_peer(sample_peer.clone())
+ 139:         .expect("configure_peer should succeed");
+ 140: 
+ 141:     let ep = backend
+ 142:         .current_peer_endpoint(&sample_peer.node_id)
+ 143:         .expect("current_peer_endpoint should succeed");
+ 144:     assert!(ep.is_some(), "configured peer must have an endpoint");
+ 145: 
+ 146:     backend
+ 147:         .update_peer_endpoint(
+ 148:             &sample_peer.node_id,
+ 149:             SocketEndpoint {
+ 150:                 addr: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+ 151:                 port: 51821,
+ 152:             },
+ 153:         )
+ 154:         .expect("update_peer_endpoint should succeed");
+ 155: 
+ 156:     backend
+ 157:         .peer_latest_handshake_unix(&sample_peer.node_id)
+ 158:         .expect("peer_latest_handshake_unix should succeed for known peer");
+ 159: 
+ 160:     backend
+ 161:         .apply_routes(vec![Route {
+ 162:             destination_cidr: "100.64.0.0/10".to_string(),
+ 163:             via_node: sample_peer.node_id.clone(),
+ 164:             kind: RouteKind::Mesh,
+ 165:         }])
+ 166:         .expect("apply_routes should succeed");
+ 167: 
+ 168:     backend
+ 169:         .set_exit_mode(ExitMode::Off)
+ 170:         .expect("set_exit_mode should succeed");
+ 171: 
+ 172:     let stats = backend.stats().expect("stats should succeed");
+ 173:     assert_eq!(stats.peer_count, 1);
+ 174: 
+ 175:     backend
+ 176:         .remove_peer(&sample_peer.node_id)
+ 177:         .expect("remove_peer should succeed");
+ 178: 
+ 179:     let stats_after = backend.stats().expect("stats after remove should succeed");
+ 180:     assert_eq!(stats_after.peer_count, 0);
+ 181: 
+ 182:     backend.shutdown().expect("shutdown should succeed");
+ 183: }
+ 184: 
+ 185: #[test]
+ 186: #[cfg(target_os = "linux")]
+ 187: fn userspace_backend_rejects_ops_before_start() {
+ 188:     let Some(key_path) = conformance_key_path() else {
+ 189:         return;
+ 190:     };
+ 191: 
+ 192:     use rustynet_backend_api::{NodeId, PeerConfig, SocketEndpoint, TunnelBackend};
+ 193:     use std::net::{IpAddr, Ipv4Addr};
+ 194: 
+ 195:     let mut backend = make_backend(&key_path);
+ 196: 
+ 197:     let p = PeerConfig {
+ 198:         node_id: NodeId::new("p1").expect("valid node id"),
+ 199:         endpoint: SocketEndpoint {
+ 200:             addr: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+ 201:             port: 51820,
+ 202:         },
+ 203:         public_key: [1u8; 32],
+ 204:         allowed_ips: vec!["100.64.2.0/24".to_string()],
+ 205:     };
+ 206: 
+ 207:     let err = backend
+ 208:         .configure_peer(p)
+ 209:         .expect_err("configure_peer must require running state");
+ 210:     assert_eq!(
+ 211:         err.kind,
+ 212:         BackendErrorKind::NotRunning,
+ 213:         "pre-start configure_peer must return NotRunning"
+ 214:     );
+ 215: }
+
